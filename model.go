@@ -219,6 +219,14 @@ func (m model) updateFiltering(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.offset = m.syncedOffset()
 		}
 
+	case tea.KeyCtrlW:
+		if len(m.filter) > 0 {
+			m.filter = ""
+			m.displayList = m.buildDisplayList()
+			m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
+			m.offset = m.syncedOffset()
+		}
+
 	case tea.KeyBackspace:
 		if len(m.filter) > 0 {
 			r := []rune(m.filter)
