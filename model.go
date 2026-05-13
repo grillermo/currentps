@@ -17,6 +17,7 @@ const pollInterval = 2 * time.Second
 
 type procEntry struct {
 	name  string
+	cmd   string
 	cpu   float64
 	ports []int
 	pid   string
@@ -27,6 +28,7 @@ type model struct {
 	sampleCount  map[string]int
 	latestPorts  map[string][]int
 	latestPID    map[string]string
+	latestCmd    map[string]string
 	excluded     map[string]struct{}
 	excludedPath string
 	filter       string
@@ -53,6 +55,7 @@ func newModel(excluded map[string]struct{}, excludedPath string) model {
 		sampleCount:  make(map[string]int),
 		latestPorts:  make(map[string][]int),
 		latestPID:    make(map[string]string),
+		latestCmd:    make(map[string]string),
 		excluded:     excluded,
 		excludedPath: excludedPath,
 		width:        80,
@@ -95,6 +98,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		nextPorts := make(map[string][]int, len(msg.entries))
 		nextPID := make(map[string]string, len(msg.entries))
+		nextCmd := make(map[string]string, len(msg.entries))
 		for _, e := range msg.entries {
 			m.cumulative[e.name] += e.cpu
 			m.sampleCount[e.name]++
@@ -102,9 +106,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				nextPorts[e.name] = e.ports
 			}
 			nextPID[e.name] = e.pid
+			nextCmd[e.name] = e.cmd
 		}
 		m.latestPorts = nextPorts
 		m.latestPID = nextPID
+		m.latestCmd = nextCmd
 		m.displayList = m.buildDisplayList()
 		m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
 		m.offset = m.syncedOffset()
@@ -261,7 +267,17 @@ func (m model) View() string {
 	sb.WriteString(dividerStyle.Render(strings.Repeat("─", 52)))
 	sb.WriteString("\n")
 
-	header := fmt.Sprintf("  %-8s  %-9s  %-7s  %-20s  %s", "Position", "Avg CPU%", "PID", "Port", "Process Name")
+	const (
+		nameWidth = 25
+		// prefix(2) + pos(8) + sep(2) + cpu(9) + sep(2) + pid(7) + sep(2) + port(20) + sep(2) + name(25) + sep(2)
+		fixedWidth = 2 + 8 + 2 + 9 + 2 + 7 + 2 + 20 + 2 + nameWidth + 2
+	)
+	cmdWidth := m.width - fixedWidth
+	if cmdWidth < 10 {
+		cmdWidth = 10
+	}
+
+	header := fmt.Sprintf("  %-8s  %-9s  %-7s  %-20s  %-*s  %s", "Position", "Avg CPU%", "PID", "Port", nameWidth, "Process Name", "Command")
 	sb.WriteString(headerStyle.Render(header))
 	sb.WriteString("\n")
 
@@ -272,7 +288,7 @@ func (m model) View() string {
 	for i := m.offset; i < end; i++ {
 		p := m.displayList[i]
 		prefix := "  "
-		line := fmt.Sprintf("%-8d  %8.1f%%  %-7s  %-20s  %s", i+1, p.cpu, p.pid, formatPorts(p.ports), p.name)
+		line := fmt.Sprintf("%-8d  %8.1f%%  %-7s  %-20s  %-*s  %s", i+1, p.cpu, p.pid, formatPorts(p.ports), nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
 		switch {
 		case p.name == m.selected:
 			prefix = "★ "
@@ -303,6 +319,7 @@ func (m model) View() string {
 func (m model) buildDisplayList() []procEntry {
 	type kv struct {
 		name  string
+		cmd   string
 		cpu   float64
 		ports []int
 		pid   string
@@ -318,14 +335,14 @@ func (m model) buildDisplayList() []procEntry {
 			continue
 		}
 		cpu := sum / float64(m.sampleCount[name])
-		all = append(all, kv{name, cpu, ports, m.latestPID[name]})
+		all = append(all, kv{name, m.latestCmd[name], cpu, ports, m.latestPID[name]})
 	}
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].cpu > all[j].cpu
 	})
 	result := make([]procEntry, len(all))
 	for i, kv := range all {
-		result[i] = procEntry{name: kv.name, cpu: kv.cpu, ports: kv.ports, pid: kv.pid}
+		result[i] = procEntry{name: kv.name, cmd: kv.cmd, cpu: kv.cpu, ports: kv.ports, pid: kv.pid}
 	}
 	return result
 }
@@ -340,6 +357,14 @@ func matchesFilter(name string, ports []int, filterLower string) bool {
 		}
 	}
 	return false
+}
+
+func truncateLeft(s string, maxLen int) string {
+	r := []rune(s)
+	if len(r) <= maxLen {
+		return s
+	}
+	return "…" + string(r[len(r)-maxLen+1:])
 }
 
 func clamp(v, lo, hi int) int {

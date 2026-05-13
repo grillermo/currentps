@@ -16,6 +16,7 @@ import (
 type rawEntry struct {
 	cpu   float64
 	name  string
+	cmd   string
 	pid   string
 	ports []int
 }
@@ -46,7 +47,7 @@ func parsePS(output string) []rawEntry {
 		}
 		args := strings.TrimSpace(line[argsStart:])
 		name := processDisplayName(args, pid)
-		entries = append(entries, rawEntry{cpu: cpu, name: name, pid: pid})
+		entries = append(entries, rawEntry{cpu: cpu, name: name, cmd: args, pid: pid})
 	}
 	return entries
 }
