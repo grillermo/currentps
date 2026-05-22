@@ -96,21 +96,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		nextCumulative := make(map[string]float64, len(msg.entries))
+		nextSampleCount := make(map[string]int, len(msg.entries))
 		nextPorts := make(map[string][]int, len(msg.entries))
 		nextPID := make(map[string]string, len(msg.entries))
 		nextCmd := make(map[string]string, len(msg.entries))
 		for _, e := range msg.entries {
-			m.cumulative[e.name] += e.cpu
-			m.sampleCount[e.name]++
+			nextCumulative[e.name] = m.cumulative[e.name] + e.cpu
+			nextSampleCount[e.name] = m.sampleCount[e.name] + 1
 			if len(e.ports) > 0 {
 				nextPorts[e.name] = e.ports
 			}
 			nextPID[e.name] = e.pid
 			nextCmd[e.name] = e.cmd
 		}
+		m.cumulative = nextCumulative
+		m.sampleCount = nextSampleCount
 		m.latestPorts = nextPorts
 		m.latestPID = nextPID
 		m.latestCmd = nextCmd
+		if m.selected != "" {
+			if _, ok := m.latestPID[m.selected]; !ok {
+				m.selected = ""
+			}
+		}
 		m.displayList = m.buildDisplayList()
 		m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
 		m.offset = m.syncedOffset()
@@ -156,6 +165,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			delete(m.sampleCount, m.selected)
 			delete(m.latestPorts, m.selected)
 			delete(m.latestPID, m.selected)
+			delete(m.latestCmd, m.selected)
 			m.selected = ""
 			m.displayList = m.buildDisplayList()
 			m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)

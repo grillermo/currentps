@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestBuildDisplayListFiltersExcluded(t *testing.T) {
@@ -142,6 +144,48 @@ func TestBuildDisplayListEmptyCumulative(t *testing.T) {
 	}
 }
 
+func TestTickPrunesProcessesMissingFromLatestPoll(t *testing.T) {
+	m := newModel(make(map[string]struct{}), "")
+
+	updated, _ := m.Update(tickMsg{entries: []rawEntry{
+		{name: "node (123)", pid: "123", cmd: "node server.js", cpu: 10},
+		{name: "ruby (456)", pid: "456", cmd: "ruby app.rb", cpu: 20},
+	}})
+	m = updated.(model)
+
+	updated, _ = m.Update(tickMsg{entries: []rawEntry{
+		{name: "node (123)", pid: "123", cmd: "node server.js", cpu: 30},
+	}})
+	m = updated.(model)
+
+	if _, ok := m.cumulative["ruby (456)"]; ok {
+		t.Fatal("expected ruby process to be pruned after disappearing from poll")
+	}
+	if _, ok := m.latestPID["ruby (456)"]; ok {
+		t.Fatal("expected ruby pid to be removed after disappearing from poll")
+	}
+	if len(m.displayList) != 1 || m.displayList[0].name != "node (123)" {
+		t.Fatalf("expected only live node process in display list, got %+v", m.displayList)
+	}
+	if m.displayList[0].pid != "123" {
+		t.Fatalf("expected node pid to remain populated, got %q", m.displayList[0].pid)
+	}
+}
+
+func TestTickClearsSelectionWhenProcessDisappears(t *testing.T) {
+	m := newModel(make(map[string]struct{}), "")
+	m.selected = "ruby (456)"
+
+	updated, _ := m.Update(tickMsg{entries: []rawEntry{
+		{name: "node (123)", pid: "123", cmd: "node server.js", cpu: 30},
+	}})
+	m = updated.(model)
+
+	if m.selected != "" {
+		t.Fatalf("expected selection to clear when selected process disappears, got %q", m.selected)
+	}
+}
+
 func TestClamp(t *testing.T) {
 	if clamp(5, 0, 10) != 5 {
 		t.Error("clamp(5,0,10) should be 5")
@@ -154,5 +198,22 @@ func TestClamp(t *testing.T) {
 	}
 	if clamp(5, 0, -1) != 0 {
 		t.Error("clamp(5,0,-1) should be 0 (empty list case)")
+	}
+}
+
+func TestKillRemovesLatestCmd(t *testing.T) {
+	m := newModel(make(map[string]struct{}), "")
+	m.selected = "node (123)"
+	m.cumulative["node (123)"] = 10
+	m.sampleCount["node (123)"] = 1
+	m.latestPID["node (123)"] = "not-a-pid"
+	m.latestCmd["node (123)"] = "node server.js"
+	m.displayList = []procEntry{{name: "node (123)"}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF2})
+	m = updated.(model)
+
+	if _, ok := m.latestCmd["node (123)"]; ok {
+		t.Fatal("expected latest command to be removed on kill action")
 	}
 }
