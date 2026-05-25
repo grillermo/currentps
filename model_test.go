@@ -91,6 +91,11 @@ func TestBuildDisplayListFilterByPort(t *testing.T) {
 		"sshd (789)":     10.0,
 	}
 	m.sampleCount = map[string]int{"node (123)": 1, "postgres (456)": 1, "sshd (789)": 1}
+	m.latestCmd = map[string]string{
+		"node (123)":     "node server.js",
+		"postgres (456)": "postgres -D /usr/local/var/postgres",
+		"sshd (789)":     "/usr/sbin/sshd -D",
+	}
 	m.latestPorts = map[string][]int{
 		"node (123)":     {3000, 8080},
 		"postgres (456)": {5432},
@@ -112,6 +117,12 @@ func TestBuildDisplayListFilterByPort(t *testing.T) {
 	list = m.buildDisplayList()
 	if len(list) != 1 || list[0].name != "node (123)" {
 		t.Errorf("filter \"node\" expected node (123), got %v", list)
+	}
+
+	m.filter = "server.js"
+	list = m.buildDisplayList()
+	if len(list) != 1 || list[0].name != "node (123)" {
+		t.Errorf("filter \"server.js\" expected node (123), got %v", list)
 	}
 
 	m.filter = "9999"
@@ -148,23 +159,23 @@ func TestTickPrunesProcessesMissingFromLatestPoll(t *testing.T) {
 	m := newModel(make(map[string]struct{}), "")
 
 	updated, _ := m.Update(tickMsg{entries: []rawEntry{
-		{name: "node (123)", pid: "123", cmd: "node server.js", cpu: 10},
-		{name: "ruby (456)", pid: "456", cmd: "ruby app.rb", cpu: 20},
+		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 10},
+		{key: "456", name: "ruby", pid: "456", cmd: "ruby app.rb", cpu: 20},
 	}})
 	m = updated.(model)
 
 	updated, _ = m.Update(tickMsg{entries: []rawEntry{
-		{name: "node (123)", pid: "123", cmd: "node server.js", cpu: 30},
+		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 30},
 	}})
 	m = updated.(model)
 
-	if _, ok := m.cumulative["ruby (456)"]; ok {
+	if _, ok := m.cumulative["456"]; ok {
 		t.Fatal("expected ruby process to be pruned after disappearing from poll")
 	}
-	if _, ok := m.latestPID["ruby (456)"]; ok {
+	if _, ok := m.latestPID["456"]; ok {
 		t.Fatal("expected ruby pid to be removed after disappearing from poll")
 	}
-	if len(m.displayList) != 1 || m.displayList[0].name != "node (123)" {
+	if len(m.displayList) != 1 || m.displayList[0].name != "node" {
 		t.Fatalf("expected only live node process in display list, got %+v", m.displayList)
 	}
 	if m.displayList[0].pid != "123" {
@@ -174,15 +185,32 @@ func TestTickPrunesProcessesMissingFromLatestPoll(t *testing.T) {
 
 func TestTickClearsSelectionWhenProcessDisappears(t *testing.T) {
 	m := newModel(make(map[string]struct{}), "")
-	m.selected = "ruby (456)"
+	m.selected = "456"
 
 	updated, _ := m.Update(tickMsg{entries: []rawEntry{
-		{name: "node (123)", pid: "123", cmd: "node server.js", cpu: 30},
+		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 30},
 	}})
 	m = updated.(model)
 
 	if m.selected != "" {
 		t.Fatalf("expected selection to clear when selected process disappears, got %q", m.selected)
+	}
+}
+
+func TestTickKeepsSameNameProcessesSeparate(t *testing.T) {
+	m := newModel(make(map[string]struct{}), "")
+
+	updated, _ := m.Update(tickMsg{entries: []rawEntry{
+		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 10},
+		{key: "456", name: "node", pid: "456", cmd: "node worker.js", cpu: 30},
+	}})
+	m = updated.(model)
+
+	if len(m.displayList) != 2 {
+		t.Fatalf("expected same-name processes to stay separate, got %+v", m.displayList)
+	}
+	if m.displayList[0].pid != "456" || m.displayList[1].pid != "123" {
+		t.Fatalf("expected rows to retain distinct pids sorted by cpu, got %+v", m.displayList)
 	}
 }
 

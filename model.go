@@ -16,6 +16,7 @@ import (
 const pollInterval = 2 * time.Second
 
 type procEntry struct {
+	key   string
 	name  string
 	cmd   string
 	cpu   float64
@@ -29,6 +30,7 @@ type model struct {
 	latestPorts  map[string][]int
 	latestPID    map[string]string
 	latestCmd    map[string]string
+	latestName   map[string]string
 	excluded     map[string]struct{}
 	excludedPath string
 	filter       string
@@ -56,6 +58,7 @@ func newModel(excluded map[string]struct{}, excludedPath string) model {
 		latestPorts:  make(map[string][]int),
 		latestPID:    make(map[string]string),
 		latestCmd:    make(map[string]string),
+		latestName:   make(map[string]string),
 		excluded:     excluded,
 		excludedPath: excludedPath,
 		width:        80,
@@ -101,20 +104,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		nextPorts := make(map[string][]int, len(msg.entries))
 		nextPID := make(map[string]string, len(msg.entries))
 		nextCmd := make(map[string]string, len(msg.entries))
+		nextName := make(map[string]string, len(msg.entries))
 		for _, e := range msg.entries {
-			nextCumulative[e.name] = m.cumulative[e.name] + e.cpu
-			nextSampleCount[e.name] = m.sampleCount[e.name] + 1
-			if len(e.ports) > 0 {
-				nextPorts[e.name] = e.ports
+			key := e.key
+			if key == "" {
+				key = e.pid
 			}
-			nextPID[e.name] = e.pid
-			nextCmd[e.name] = e.cmd
+			if key == "" {
+				key = e.name
+			}
+			nextCumulative[key] = m.cumulative[key] + e.cpu
+			nextSampleCount[key] = m.sampleCount[key] + 1
+			if len(e.ports) > 0 {
+				nextPorts[key] = e.ports
+			}
+			nextPID[key] = e.pid
+			nextCmd[key] = e.cmd
+			nextName[key] = e.name
 		}
 		m.cumulative = nextCumulative
 		m.sampleCount = nextSampleCount
 		m.latestPorts = nextPorts
 		m.latestPID = nextPID
 		m.latestCmd = nextCmd
+		m.latestName = nextName
 		if m.selected != "" {
 			if _, ok := m.latestPID[m.selected]; !ok {
 				m.selected = ""
@@ -153,7 +166,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyEnter:
 		if len(m.displayList) > 0 {
-			m.selected = m.displayList[m.cursor].name
+			m.selected = m.displayList[m.cursor].key
 		}
 
 	case tea.KeyF2:
@@ -166,6 +179,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			delete(m.latestPorts, m.selected)
 			delete(m.latestPID, m.selected)
 			delete(m.latestCmd, m.selected)
+			delete(m.latestName, m.selected)
 			m.selected = ""
 			m.displayList = m.buildDisplayList()
 			m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
@@ -174,13 +188,17 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyF1:
 		if m.selected != "" {
+			name := m.selectedProcessName()
+			if name == "" {
+				break
+			}
 			next := make(map[string]struct{}, len(m.excluded)+1)
 			for k, v := range m.excluded {
 				next[k] = v
 			}
-			next[m.selected] = struct{}{}
+			next[name] = struct{}{}
 			m.excluded = next
-			if err := appendExclusion(m.excludedPath, m.selected); err != nil {
+			if err := appendExclusion(m.excludedPath, name); err != nil {
 				fmt.Fprintf(os.Stderr, "currentps: failed to persist exclusion: %v\n", err)
 			}
 			m.selected = ""
@@ -219,7 +237,7 @@ func (m model) updateFiltering(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyEnter:
 		if len(m.displayList) > 0 {
-			m.selected = m.displayList[m.cursor].name
+			m.selected = m.displayList[m.cursor].key
 			m.filtering = false
 		}
 
@@ -269,7 +287,7 @@ func (m model) View() string {
 		title += fmt.Sprintf("   [filter: %s_]", m.filter)
 	}
 	if m.selected != "" {
-		title += fmt.Sprintf("   selected: %s", selectedStyle.Render(m.selected))
+		title += fmt.Sprintf("   selected: %s", selectedStyle.Render(m.selectedProcessName()))
 	}
 	title += fmt.Sprintf("   excluded: %d", len(m.excluded))
 	sb.WriteString(headerStyle.Render(title))
@@ -279,15 +297,15 @@ func (m model) View() string {
 
 	const (
 		nameWidth = 25
-		// prefix(2) + pos(8) + sep(2) + cpu(9) + sep(2) + pid(7) + sep(2) + port(20) + sep(2) + name(25) + sep(2)
-		fixedWidth = 2 + 8 + 2 + 9 + 2 + 7 + 2 + 20 + 2 + nameWidth + 2
+		// prefix(2) + cpu(9) + sep(2) + pid(7) + sep(2) + port(20) + sep(2) + name(25) + sep(2)
+		fixedWidth = 2 + 9 + 2 + 7 + 2 + 20 + 2 + nameWidth + 2
 	)
 	cmdWidth := m.width - fixedWidth
 	if cmdWidth < 10 {
 		cmdWidth = 10
 	}
 
-	header := fmt.Sprintf("  %-8s  %-9s  %-7s  %-20s  %-*s  %s", "Position", "Avg CPU%", "PID", "Port", nameWidth, "Process Name", "Command")
+	header := fmt.Sprintf("  %-9s  %-7s  %-20s  %-*s  %s", "Avg CPU%", "PID", "Port", nameWidth, "Process Name", "Command")
 	sb.WriteString(headerStyle.Render(header))
 	sb.WriteString("\n")
 
@@ -298,9 +316,9 @@ func (m model) View() string {
 	for i := m.offset; i < end; i++ {
 		p := m.displayList[i]
 		prefix := "  "
-		line := fmt.Sprintf("%-8d  %8.1f%%  %-7s  %-20s  %-*s  %s", i+1, p.cpu, p.pid, formatPorts(p.ports), nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
+		line := fmt.Sprintf("%8.1f%%  %-7s  %-20s  %-*s  %s", p.cpu, p.pid, formatPorts(p.ports), nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
 		switch {
-		case p.name == m.selected:
+		case p.key == m.selected:
 			prefix = "★ "
 			line = selectedStyle.Render(line)
 		case i == m.cursor:
@@ -328,6 +346,7 @@ func (m model) View() string {
 
 func (m model) buildDisplayList() []procEntry {
 	type kv struct {
+		key   string
 		name  string
 		cmd   string
 		cpu   float64
@@ -336,29 +355,57 @@ func (m model) buildDisplayList() []procEntry {
 	}
 	filterLower := strings.ToLower(m.filter)
 	all := make([]kv, 0, len(m.cumulative))
-	for name, sum := range m.cumulative {
+	for key, sum := range m.cumulative {
+		name := m.latestName[key]
+		if name == "" {
+			name = key
+		}
 		if _, ok := m.excluded[name]; ok {
 			continue
 		}
-		ports := m.latestPorts[name]
-		if filterLower != "" && !matchesFilter(name, ports, filterLower) {
+		ports := m.latestPorts[key]
+		if filterLower != "" && !matchesFilter(name, m.latestCmd[key], ports, filterLower) {
 			continue
 		}
-		cpu := sum / float64(m.sampleCount[name])
-		all = append(all, kv{name, m.latestCmd[name], cpu, ports, m.latestPID[name]})
+		cpu := sum / float64(m.sampleCount[key])
+		all = append(all, kv{key, name, m.latestCmd[key], cpu, ports, m.latestPID[key]})
 	}
 	sort.Slice(all, func(i, j int) bool {
+		if all[i].cpu == all[j].cpu {
+			if all[i].name == all[j].name {
+				return all[i].pid < all[j].pid
+			}
+			return all[i].name < all[j].name
+		}
 		return all[i].cpu > all[j].cpu
 	})
 	result := make([]procEntry, len(all))
 	for i, kv := range all {
-		result[i] = procEntry{name: kv.name, cmd: kv.cmd, cpu: kv.cpu, ports: kv.ports, pid: kv.pid}
+		result[i] = procEntry{key: kv.key, name: kv.name, cmd: kv.cmd, cpu: kv.cpu, ports: kv.ports, pid: kv.pid}
 	}
 	return result
 }
 
-func matchesFilter(name string, ports []int, filterLower string) bool {
+func (m model) selectedProcessName() string {
+	if m.selected == "" {
+		return ""
+	}
+	for _, p := range m.displayList {
+		if p.key == m.selected {
+			return p.name
+		}
+	}
+	if name := m.latestName[m.selected]; name != "" {
+		return name
+	}
+	return m.selected
+}
+
+func matchesFilter(name string, cmd string, ports []int, filterLower string) bool {
 	if strings.Contains(strings.ToLower(name), filterLower) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(cmd), filterLower) {
 		return true
 	}
 	for _, p := range ports {
