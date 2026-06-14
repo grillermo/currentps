@@ -132,6 +132,23 @@ func TestBuildDisplayListFilterByPort(t *testing.T) {
 	}
 }
 
+func TestBuildDisplayListFilterIgnoresPID(t *testing.T) {
+	m := newModel(make(map[string]struct{}), "")
+	m.cumulative = map[string]float64{
+		"node (123)": 50.0,
+	}
+	m.sampleCount = map[string]int{"node (123)": 1}
+	m.latestPorts = map[string][]int{"node (123)": {3000}}
+	m.latestPID = map[string]string{"node (123)": "123"}
+
+	m.filter = "123"
+	list := m.buildDisplayList()
+
+	if len(list) != 0 {
+		t.Errorf("filter \"123\" expected empty because it only matches PID, got %v", list)
+	}
+}
+
 func TestBuildDisplayListProjectsPorts(t *testing.T) {
 	m := newModel(make(map[string]struct{}), "")
 	m.cumulative = map[string]float64{"node (123)": 50.0}

@@ -364,7 +364,7 @@ func (m model) buildDisplayList() []procEntry {
 			continue
 		}
 		ports := m.latestPorts[key]
-		if filterLower != "" && !matchesFilter(name, m.latestCmd[key], ports, filterLower) {
+		if filterLower != "" && !matchesFilter(name, m.latestCmd[key], ports, filterLower, m.latestPID[key]) {
 			continue
 		}
 		cpu := sum / float64(m.sampleCount[key])
@@ -401,8 +401,8 @@ func (m model) selectedProcessName() string {
 	return m.selected
 }
 
-func matchesFilter(name string, cmd string, ports []int, filterLower string) bool {
-	if strings.Contains(strings.ToLower(name), filterLower) {
+func matchesFilter(name string, cmd string, ports []int, filterLower, pid string) bool {
+	if strings.Contains(strings.ToLower(filterProcessName(name, pid)), filterLower) {
 		return true
 	}
 	if strings.Contains(strings.ToLower(cmd), filterLower) {
@@ -414,6 +414,13 @@ func matchesFilter(name string, cmd string, ports []int, filterLower string) boo
 		}
 	}
 	return false
+}
+
+func filterProcessName(name, pid string) string {
+	if pid == "" {
+		return name
+	}
+	return strings.TrimSuffix(name, fmt.Sprintf(" (%s)", pid))
 }
 
 func truncateLeft(s string, maxLen int) string {
