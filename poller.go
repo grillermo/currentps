@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 type rawEntry struct {
 	cpu   float64
+	key   string
 	name  string
 	cmd   string
 	pid   string
@@ -25,7 +27,13 @@ type tickMsg struct {
 	entries []rawEntry
 }
 
+var commWarnOnce sync.Once
+
 func parsePS(output string) []rawEntry {
+	return parsePSWithComms(output, nil)
+}
+
+func parsePSWithComms(output string, comms map[string]string) []rawEntry {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) < 2 {
 		return nil
@@ -46,27 +54,68 @@ func parsePS(output string) []rawEntry {
 			continue
 		}
 		args := strings.TrimSpace(line[argsStart:])
-		name := processDisplayName(args, pid)
-		entries = append(entries, rawEntry{cpu: cpu, name: name, cmd: args, pid: pid})
+		name := processDisplayName(comms[pid], args)
+		entries = append(entries, rawEntry{cpu: cpu, key: pid, name: name, cmd: args, pid: pid})
 	}
 	return entries
 }
 
-func processDisplayName(args, pid string) string {
+func processDisplayName(comm, args string) string {
+	if title := customThreadName(args); title != "" {
+		return title
+	}
+
+	if comm = strings.TrimSpace(comm); comm != "" {
+		return comm
+	}
+
+	return argv0Basename(args)
+}
+
+func customThreadName(args string) string {
 	if strings.HasSuffix(args, "]") {
 		if i := strings.LastIndex(args, "["); i != -1 {
 			title := strings.TrimSpace(args[i:])
 			if len(title) >= 3 {
-			return fmt.Sprintf("%s (%s)", title, pid)
+				return title
 			}
 		}
 	}
+	return ""
+}
 
+func argv0Basename(args string) string {
 	argv := strings.Fields(args)
 	if len(argv) == 0 {
-		return fmt.Sprintf("unknown (%s)", pid)
+		return "unknown"
 	}
-	return fmt.Sprintf("%s (%s)", filepath.Base(argv[0]), pid)
+	return filepath.Base(argv[0])
+}
+
+func parseProcComms(output string) map[string]string {
+	comms := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid := fields[0]
+		commStart := strings.Index(line, fields[1])
+		if commStart == -1 {
+			continue
+		}
+		if comm := strings.TrimSpace(line[commStart:]); comm != "" {
+			comms[pid] = comm
+		}
+	}
+	return comms
+}
+
+func procCommPSArgs() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"-axo", "pid=,ucomm="}
+	}
+	return []string{"-eo", "pid=,comm="}
 }
 
 func fetchProcesses() tickMsg {
@@ -74,13 +123,21 @@ func fetchProcesses() tickMsg {
 		wg       sync.WaitGroup
 		psOut    string
 		psErr    error
+		commOut  string
+		commErr  error
 		portsMap map[string][]int
 	)
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		out, err := exec.Command("ps", "-eo", "%cpu,pid,args").Output()
 		psOut, psErr = string(out), err
+	}()
+	go func() {
+		defer wg.Done()
+		args := procCommPSArgs()
+		out, err := exec.Command("ps", args...).Output()
+		commOut, commErr = string(out), err
 	}()
 	go func() {
 		defer wg.Done()
@@ -92,7 +149,15 @@ func fetchProcesses() tickMsg {
 		fmt.Fprintf(os.Stderr, "top_cpu: ps error: %v\n", psErr)
 		return tickMsg{}
 	}
-	entries := parsePS(psOut)
+	var comms map[string]string
+	if commErr != nil {
+		commWarnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "top_cpu: ps comm error: %v (falling back to argv names)\n", commErr)
+		})
+	} else {
+		comms = parseProcComms(commOut)
+	}
+	entries := parsePSWithComms(psOut, comms)
 	for i := range entries {
 		entries[i].ports = portsMap[entries[i].pid]
 	}

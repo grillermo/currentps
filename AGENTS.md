@@ -21,7 +21,7 @@ Run all commands through `rtk`.
 ```sh
 rtk go test ./...
 rtk gofmt -w .
-rtk go build -o currentps .
+rtk go build -o /tmp/currentps-build-check .
 rtk ./currentps
 ```
 
@@ -39,7 +39,8 @@ rtk ./currentps
 - Keep the app as a small single-package Go program unless a change clearly needs more structure.
 - Prefer pure helper functions for parsing, formatting, filtering, and list-building so behavior remains unit-testable without launching the TUI.
 - Do not make tests depend on live system process state, `ps`, or `lsof`; use fixture strings and direct model messages instead.
-- Preserve the display identity format of processes as `<basename-or-title> (<pid>)`, since exclusions and selections key off that name.
+- Keep the Process Name column aligned with htop-style comm names (`ucomm` on macOS, `comm` elsewhere). Do not append the PID to the visible name; the PID column already carries it.
+- Keep internal process identity separate from the visible name so processes with the same comm value do not merge.
 - Be careful with process actions: `F2` sends `SIGKILL` to the selected process PID and then removes stale state from all model maps.
 - Keep filtering case-insensitive for names and substring-based for port numbers.
 - Keep port lists sorted, deduplicated, and truncated through `formatPorts`.
@@ -48,5 +49,5 @@ rtk ./currentps
 ## Verification
 
 - Run `rtk go test ./...` after behavior changes.
-- Run `rtk go build -o currentps .` after changes that affect startup, dependencies, or OS command integration.
+- Run `rtk go build -o /tmp/currentps-build-check .` after changes that affect startup, dependencies, or OS command integration.
 - If rendering changes, inspect model `View()` output through focused tests where practical.
