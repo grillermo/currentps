@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -186,6 +187,15 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.offset = m.syncedOffset()
 		}
 
+	case tea.KeyF3:
+		if m.selected != "" {
+			if cmd, ok := m.latestCmd[m.selected]; ok && cmd != "" {
+				c := exec.Command("pbcopy")
+				c.Stdin = strings.NewReader(cmd)
+				c.Run()
+			}
+		}
+
 	case tea.KeyF1:
 		if m.selected != "" {
 			name := m.selectedProcessName()
@@ -333,7 +343,7 @@ func (m model) View() string {
 	var help string
 	switch {
 	case m.selected != "":
-		help = "↑↓ navigate  F1 exclude  F2 kill  Esc deselect  q quit"
+		help = "↑↓ navigate  F1 exclude  F2 kill  F3 copy cmd  Esc deselect  q quit"
 	case m.filtering:
 		help = "↑↓ navigate  Enter select  type to filter  Backspace  Esc exit filter"
 	default:
