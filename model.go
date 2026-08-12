@@ -14,7 +14,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const pollInterval = 2 * time.Second
+const (
+	pollInterval      = 2 * time.Second
+	portsPollInterval = 5 * time.Second
+)
 
 type procEntry struct {
 	key   string
@@ -29,6 +32,8 @@ type model struct {
 	cumulative   map[string]float64
 	sampleCount  map[string]int
 	latestPorts  map[string][]int
+	portsByPID   map[string][]int
+	portsLoaded  bool
 	latestPID    map[string]string
 	latestCmd    map[string]string
 	latestName   map[string]string
@@ -50,6 +55,7 @@ var (
 	headerStyle   = lipgloss.NewStyle().Bold(true)
 	dividerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	loadingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 )
 
 func newModel(excluded map[string]struct{}, excludedPath string) model {
@@ -57,6 +63,7 @@ func newModel(excluded map[string]struct{}, excludedPath string) model {
 		cumulative:   make(map[string]float64),
 		sampleCount:  make(map[string]int),
 		latestPorts:  make(map[string][]int),
+		portsByPID:   make(map[string][]int),
 		latestPID:    make(map[string]string),
 		latestCmd:    make(map[string]string),
 		latestName:   make(map[string]string),
@@ -88,7 +95,8 @@ func (m model) syncedOffset() int {
 }
 
 func (m model) Init() tea.Cmd {
-	return pollCmd(pollInterval)
+	// Process list renders right away; ports arrive later via portsMsg.
+	return tea.Batch(pollNowCmd(), portsCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -102,7 +110,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		nextCumulative := make(map[string]float64, len(msg.entries))
 		nextSampleCount := make(map[string]int, len(msg.entries))
-		nextPorts := make(map[string][]int, len(msg.entries))
+		nextPorts := make(map[string][]int, len(m.latestPorts))
 		nextPID := make(map[string]string, len(msg.entries))
 		nextCmd := make(map[string]string, len(msg.entries))
 		nextName := make(map[string]string, len(msg.entries))
@@ -116,8 +124,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			nextCumulative[key] = m.cumulative[key] + e.cpu
 			nextSampleCount[key] = m.sampleCount[key] + 1
-			if len(e.ports) > 0 {
-				nextPorts[key] = e.ports
+			// Ports come from the separate lsof poll.
+			if ports := m.portsByPID[e.pid]; len(ports) > 0 {
+				nextPorts[key] = ports
 			}
 			nextPID[key] = e.pid
 			nextCmd[key] = e.cmd
@@ -138,6 +147,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
 		m.offset = m.syncedOffset()
 		return m, pollCmd(pollInterval)
+
+	case portsMsg:
+		m.portsByPID = msg.ports
+		m.portsLoaded = true
+		nextPorts := make(map[string][]int, len(msg.ports))
+		for key, pid := range m.latestPID {
+			if ports := msg.ports[pid]; len(ports) > 0 {
+				nextPorts[key] = ports
+			}
+		}
+		m.latestPorts = nextPorts
+		m.displayList = m.buildDisplayList()
+		m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
+		m.offset = m.syncedOffset()
+		return m, portsPollCmd(portsPollInterval)
 
 	case tea.KeyMsg:
 		if m.filtering {
@@ -300,6 +324,9 @@ func (m model) View() string {
 		title += fmt.Sprintf("   selected: %s", selectedStyle.Render(m.selectedProcessName()))
 	}
 	title += fmt.Sprintf("   excluded: %d", len(m.excluded))
+	if !m.portsLoaded {
+		title += "   " + loadingStyle.Render("⏳ loading ports…")
+	}
 	sb.WriteString(headerStyle.Render(title))
 	sb.WriteString("\n")
 	sb.WriteString(dividerStyle.Render(strings.Repeat("─", 52)))
@@ -326,7 +353,11 @@ func (m model) View() string {
 	for i := m.offset; i < end; i++ {
 		p := m.displayList[i]
 		prefix := "  "
-		line := fmt.Sprintf("%8.1f%%  %-7s  %-20s  %-*s  %s", p.cpu, p.pid, formatPorts(p.ports), nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
+		ports := formatPorts(p.ports)
+		if !m.portsLoaded {
+			ports = "…"
+		}
+		line := fmt.Sprintf("%8.1f%%  %-7s  %-20s  %-*s  %s", p.cpu, p.pid, ports, nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
 		switch {
 		case p.key == m.selected:
 			prefix = "★ "
