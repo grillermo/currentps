@@ -20,7 +20,6 @@ type rawEntry struct {
 	name  string
 	cmd   string
 	pid   string
-	ports []int
 }
 
 type tickMsg struct {
@@ -120,14 +119,13 @@ func procCommPSArgs() []string {
 
 func fetchProcesses() tickMsg {
 	var (
-		wg       sync.WaitGroup
-		psOut    string
-		psErr    error
-		commOut  string
-		commErr  error
-		portsMap map[string][]int
+		wg      sync.WaitGroup
+		psOut   string
+		psErr   error
+		commOut string
+		commErr error
 	)
-	wg.Add(3)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		out, err := exec.Command("ps", "-eo", "%cpu,pid,args").Output()
@@ -138,10 +136,6 @@ func fetchProcesses() tickMsg {
 		args := procCommPSArgs()
 		out, err := exec.Command("ps", args...).Output()
 		commOut, commErr = string(out), err
-	}()
-	go func() {
-		defer wg.Done()
-		portsMap = fetchListeningPorts()
 	}()
 	wg.Wait()
 
@@ -157,15 +151,34 @@ func fetchProcesses() tickMsg {
 	} else {
 		comms = parseProcComms(commOut)
 	}
-	entries := parsePSWithComms(psOut, comms)
-	for i := range entries {
-		entries[i].ports = portsMap[entries[i].pid]
-	}
-	return tickMsg{entries: entries}
+	return tickMsg{entries: parsePSWithComms(psOut, comms)}
 }
 
 func pollCmd(interval time.Duration) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return fetchProcesses()
+	})
+}
+
+// pollNowCmd runs a fetch immediately instead of waiting a full interval.
+func pollNowCmd() tea.Cmd {
+	return func() tea.Msg { return fetchProcesses() }
+}
+
+// portsMsg carries listening ports keyed by PID. lsof is slow, so ports are
+// loaded out of band from the process list.
+type portsMsg struct {
+	ports map[string][]int
+}
+
+func portsCmd() tea.Cmd {
+	return func() tea.Msg {
+		return portsMsg{ports: fetchListeningPorts()}
+	}
+}
+
+func portsPollCmd(interval time.Duration) tea.Cmd {
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
+		return portsMsg{ports: fetchListeningPorts()}
 	})
 }

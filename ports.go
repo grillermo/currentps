@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var lsofWarnOnce sync.Once
@@ -61,15 +64,38 @@ func parseLsof(out string) map[string][]int {
 	return result
 }
 
+// lsofTimeout bounds the port scan: a single wedged process (hung mount, stuck
+// kernel fd) can make lsof block indefinitely, which would otherwise leave the
+// port column loading forever.
+const lsofTimeout = 5 * time.Second
+
 func fetchListeningPorts() map[string][]int {
-	out, err := exec.Command("lsof", "-iTCP", "-sTCP:LISTEN", "-nP", "-P", "-F", "pn").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), lsofTimeout)
+	defer cancel()
+
+	// -b avoids kernel calls that can block on wedged processes; -w silences
+	// the warnings that mode produces.
+	cmd := exec.CommandContext(ctx, "lsof", "-b", "-w", "-iTCP", "-sTCP:LISTEN", "-nP", "-F", "pn")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	out := buf.Bytes()
+
+	if ctx.Err() != nil {
+		// Partial output is still useful; report the stall once.
+		lsofWarnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "currentps: lsof timed out after %s (ports may be incomplete)\n", lsofTimeout)
+		})
+		return parseLsof(string(out))
+	}
 	if err != nil {
 		// lsof returns exit 1 when no matches; still has stdout we can use.
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 && len(out) > 0 {
 			return parseLsof(string(out))
 		}
 		lsofWarnOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "top_cpu: lsof error: %v (port column will be empty)\n", err)
+			fmt.Fprintf(os.Stderr, "currentps: lsof error: %v (port column will be empty)\n", err)
 		})
 		return map[string][]int{}
 	}
