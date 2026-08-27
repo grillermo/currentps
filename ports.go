@@ -12,6 +12,8 @@ import (
 
 var lsofWarnOnce sync.Once
 
+const portColumnWidth = 6
+
 func parseLsof(out string) map[string][]int {
 	result := make(map[string][]int)
 	if out == "" {
@@ -83,10 +85,9 @@ func formatPorts(ports []int) string {
 		parts[i] = strconv.Itoa(p)
 	}
 	joined := strings.Join(parts, ",")
-	const maxWidth = 20
-	if len([]rune(joined)) <= maxWidth {
+	if len([]rune(joined)) <= portColumnWidth {
 		return joined
 	}
 	runes := []rune(joined)
-	return string(runes[:maxWidth-1]) + "…"
+	return string(runes[:portColumnWidth-1]) + "…"
 }

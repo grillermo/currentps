@@ -94,21 +94,17 @@ func TestFormatPortsSingle(t *testing.T) {
 	}
 }
 
-func TestFormatPortsMultiple(t *testing.T) {
+func TestFormatPortsMultipleTruncatesToColumnWidth(t *testing.T) {
 	got := formatPorts([]int{3000, 8080})
-	if got != "3000,8080" {
-		t.Errorf("expected \"3000,8080\", got %q", got)
+	if got != "3000,…" {
+		t.Errorf("expected six-character truncated ports, got %q", got)
 	}
 }
 
-func TestFormatPortsTruncatesPast20Chars(t *testing.T) {
+func TestFormatPortsTruncatesPastSixChars(t *testing.T) {
 	got := formatPorts([]int{3000, 3001, 8080, 9090, 5432})
-	// "3000,3001,8080,9090,5432" = 24 chars; truncate to 19 + "…" = 20 runes
-	if len([]rune(got)) != 20 {
-		t.Errorf("expected 20 runes, got %d (%q)", len([]rune(got)), got)
-	}
-	if !contains(got, "…") {
-		t.Errorf("expected ellipsis suffix, got %q", got)
+	if got != "3000,…" {
+		t.Errorf("expected six-character truncated ports, got %q", got)
 	}
 }
 

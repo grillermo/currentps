@@ -2,10 +2,29 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestViewExpandsCommandForCompactPortColumn(t *testing.T) {
+	m := newModel(make(map[string]struct{}), "")
+	m.width = 100
+	m.displayList = []procEntry{{
+		key:   "123",
+		name:  "node",
+		cmd:   "01234567890123456789012345678901234567890123456789",
+		cpu:   10,
+		ports: []int{3000},
+		pid:   "123",
+	}}
+
+	view := m.View()
+	if !strings.Contains(view, "…890123456789012345678901234567890123456789") {
+		t.Errorf("expected command to receive reclaimed port width, got %q", view)
+	}
+}
 
 func TestBuildDisplayListFiltersExcluded(t *testing.T) {
 	m := newModel(map[string]struct{}{"firefox": {}}, "")

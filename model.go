@@ -307,15 +307,15 @@ func (m model) View() string {
 
 	const (
 		nameWidth = 25
-		// prefix(2) + cpu(9) + sep(2) + pid(7) + sep(2) + port(20) + sep(2) + name(25) + sep(2)
-		fixedWidth = 2 + 9 + 2 + 7 + 2 + 20 + 2 + nameWidth + 2
+		// prefix(2) + cpu(9) + sep(2) + pid(7) + sep(2) + port(6) + sep(2) + name(25) + sep(2)
+		fixedWidth = 2 + 9 + 2 + 7 + 2 + portColumnWidth + 2 + nameWidth + 2
 	)
 	cmdWidth := m.width - fixedWidth
 	if cmdWidth < 10 {
 		cmdWidth = 10
 	}
 
-	header := fmt.Sprintf("  %-9s  %-7s  %-20s  %-*s  %s", "Avg CPU%", "PID", "Port", nameWidth, "Process Name", "Command")
+	header := fmt.Sprintf("  %-9s  %-7s  %-*s  %-*s  %s", "Avg CPU%", "PID", portColumnWidth, "Port", nameWidth, "Process Name", "Command")
 	sb.WriteString(headerStyle.Render(header))
 	sb.WriteString("\n")
 
@@ -326,7 +326,7 @@ func (m model) View() string {
 	for i := m.offset; i < end; i++ {
 		p := m.displayList[i]
 		prefix := "  "
-		line := fmt.Sprintf("%8.1f%%  %-7s  %-20s  %-*s  %s", p.cpu, p.pid, formatPorts(p.ports), nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
+		line := fmt.Sprintf("%8.1f%%  %-7s  %-*s  %-*s  %s", p.cpu, p.pid, portColumnWidth, formatPorts(p.ports), nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
 		switch {
 		case p.key == m.selected:
 			prefix = "★ "
