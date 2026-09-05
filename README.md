@@ -35,6 +35,26 @@ go build -o currentps .
 ./currentps
 ```
 
+## Kill everything on a port
+
+```sh
+currentps kill 11434
+```
+
+Lists every process listening on that port, with all of them selected. Deselect
+the ones you want to keep, then press `Enter` to `SIGKILL` the rest.
+
+| Key            | Action                     |
+|----------------|----------------------------|
+| `↑` / `↓`      | Navigate list              |
+| `Space`        | Toggle the process under the cursor |
+| `a`            | Toggle all                 |
+| `Enter`        | Kill the selected processes |
+| `Esc` / `q`    | Cancel without killing     |
+
+Exits `0` when nothing is listening on the port or the kills succeed, `1` when
+cancelled or a kill fails, `2` on a bad argument.
+
 ## Keybindings
 
 | Key        | Action                        |
