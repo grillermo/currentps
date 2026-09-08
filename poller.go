@@ -11,15 +11,20 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/grillermo/chicle"
+)
+
+const (
+	pollInterval      = 2 * time.Second
+	portsPollInterval = 5 * time.Second
 )
 
 type rawEntry struct {
-	cpu   float64
-	key   string
-	name  string
-	cmd   string
-	pid   string
+	cpu  float64
+	key  string
+	name string
+	cmd  string
+	pid  string
 }
 
 type tickMsg struct {
@@ -154,31 +159,62 @@ func fetchProcesses() tickMsg {
 	return tickMsg{entries: parsePSWithComms(psOut, comms)}
 }
 
-func pollCmd(interval time.Duration) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return fetchProcesses()
-	})
+// pollLoop starts the two independently-ticking pollers this program has
+// always had — ps every pollInterval, lsof every portsPollInterval — and
+// merges their output into a single stream of sorted chicle.Row snapshots,
+// each already filtered against st's exclusion set. That filtering has to
+// happen here rather than via chicle's own "/" filter: a process that is
+// excluded must never reach the channel at all, not be sent and then hidden,
+// so it can never flash on screen even for one frame.
+//
+// Both goroutines fetch once immediately (mirroring the old model's Init,
+// which ran pollNowCmd/portsCmd before the first tick) so the list has real
+// data as soon as possible instead of waiting a full interval.
+func pollLoop(st *state) <-chan []chicle.Row {
+	out := make(chan []chicle.Row, 1)
+	st.out = out
+
+	go func() {
+		st.applyTick(fetchProcesses().entries)
+		publish(out, st.rows())
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			st.applyTick(fetchProcesses().entries)
+			publish(out, st.rows())
+		}
+	}()
+
+	go func() {
+		st.applyPorts(fetchListeningPorts())
+		publish(out, st.rows())
+		ticker := time.NewTicker(portsPollInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			st.applyPorts(fetchListeningPorts())
+			publish(out, st.rows())
+		}
+	}()
+
+	return out
 }
 
-// pollNowCmd runs a fetch immediately instead of waiting a full interval.
-func pollNowCmd() tea.Cmd {
-	return func() tea.Msg { return fetchProcesses() }
-}
-
-// portsMsg carries listening ports keyed by PID. lsof is slow, so ports are
-// loaded out of band from the process list.
-type portsMsg struct {
-	ports map[string][]int
-}
-
-func portsCmd() tea.Cmd {
-	return func() tea.Msg {
-		return portsMsg{ports: fetchListeningPorts()}
+// publish replaces whatever snapshot is queued on out with rows, without
+// blocking. out has room for exactly one pending snapshot, so a consumer that
+// is momentarily behind only ever sees the latest one, never a backlog — this
+// is also what lets state's exclude/forget push an out-of-band refresh from
+// the bubbletea event-loop goroutine without risking a deadlock against
+// chicle's own single-reader loop.
+func publish(out chan []chicle.Row, rows []chicle.Row) {
+	for {
+		select {
+		case out <- rows:
+			return
+		default:
+		}
+		select {
+		case <-out:
+		default:
+		}
 	}
-}
-
-func portsPollCmd(interval time.Duration) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return portsMsg{ports: fetchListeningPorts()}
-	})
 }

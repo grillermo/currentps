@@ -7,410 +7,193 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
-	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/grillermo/chicle"
 )
 
-const (
-	pollInterval      = 2 * time.Second
-	portsPollInterval = 5 * time.Second
+// Styles shared with kill.go's standalone `currentps kill <port>` picker,
+// which predates chicle and still draws its own small bubbletea program (see
+// kill.go for why: it needs a plain checkbox list keyed by port, independent
+// of anything chicle owns).
+var (
+	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	headerStyle  = lipgloss.NewStyle().Bold(true)
+	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	helpStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
-type procEntry struct {
-	key   string
-	name  string
-	cmd   string
-	cpu   float64
-	ports []int
-	pid   string
+// truncateLeft keeps the *end* of a long command line visible (the binary
+// name up front matters less than the flags/args trailing off), used by
+// kill.go's own table too.
+func truncateLeft(s string, maxLen int) string {
+	r := []rune(s)
+	if len(r) <= maxLen {
+		return s
+	}
+	return "…" + string(r[len(r)-maxLen+1:])
 }
 
-type model struct {
-	cumulative   map[string]float64
-	sampleCount  map[string]int
-	latestPorts  map[string][]int
-	portsByPID   map[string][]int
-	portsLoaded  bool
-	latestPID    map[string]string
-	latestCmd    map[string]string
-	latestName   map[string]string
+// state is the live process/ports data. Both poller.go's two ticking
+// goroutines and chicle's Action.Run callbacks (which run on the bubbletea
+// event loop's own goroutine) read and mutate it, so every access goes
+// through mu.
+type state struct {
+	mu  sync.Mutex
+	out chan []chicle.Row // set by pollLoop once the channel exists; publish drains+refills it, so it must stay bidirectional here
+
+	cumulative  map[string]float64
+	sampleCount map[string]int
+	latestPID   map[string]string
+	latestCmd   map[string]string
+	latestName  map[string]string
+	portsByPID  map[string][]int
+	portsLoaded bool
+
 	excluded     map[string]struct{}
 	excludedPath string
-	filter       string
-	filtering    bool
-	cursor       int
-	offset       int
-	width        int
-	height       int
-	selected     string
-	displayList  []procEntry
 }
 
-var (
-	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
-	headerStyle   = lipgloss.NewStyle().Bold(true)
-	dividerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	loadingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-)
-
-func newModel(excluded map[string]struct{}, excludedPath string) model {
-	return model{
+func newState(excluded map[string]struct{}, excludedPath string) *state {
+	return &state{
 		cumulative:   make(map[string]float64),
 		sampleCount:  make(map[string]int),
-		latestPorts:  make(map[string][]int),
-		portsByPID:   make(map[string][]int),
 		latestPID:    make(map[string]string),
 		latestCmd:    make(map[string]string),
 		latestName:   make(map[string]string),
+		portsByPID:   make(map[string][]int),
 		excluded:     excluded,
 		excludedPath: excludedPath,
-		width:        80,
-		height:       24,
 	}
 }
 
-func (m model) viewHeight() int {
-	const fixedRows = 5 // title + top divider + column header + bottom divider + help
-	h := m.height - fixedRows
-	if h < 1 {
-		return 1
+// applyTick folds in a fresh ps sample. Entries missing from this round are
+// dropped from every map, exactly as the old model's tickMsg handler did —
+// that's how a process that has exited disappears.
+func (s *state) applyTick(entries []rawEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nextCumulative := make(map[string]float64, len(entries))
+	nextSampleCount := make(map[string]int, len(entries))
+	nextPID := make(map[string]string, len(entries))
+	nextCmd := make(map[string]string, len(entries))
+	nextName := make(map[string]string, len(entries))
+	for _, e := range entries {
+		key := e.key
+		if key == "" {
+			key = e.pid
+		}
+		if key == "" {
+			key = e.name
+		}
+		nextCumulative[key] = s.cumulative[key] + e.cpu
+		nextSampleCount[key] = s.sampleCount[key] + 1
+		nextPID[key] = e.pid
+		nextCmd[key] = e.cmd
+		nextName[key] = e.name
 	}
-	return h
+	s.cumulative = nextCumulative
+	s.sampleCount = nextSampleCount
+	s.latestPID = nextPID
+	s.latestCmd = nextCmd
+	s.latestName = nextName
 }
 
-func (m model) syncedOffset() int {
-	vh := m.viewHeight()
-	if m.cursor < m.offset {
-		return m.cursor
-	}
-	if m.cursor >= m.offset+vh {
-		return m.cursor - vh + 1
-	}
-	return m.offset
+// applyPorts folds in a fresh lsof sample, keyed by PID.
+func (s *state) applyPorts(ports map[string][]int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.portsByPID = ports
+	s.portsLoaded = true
 }
 
-func (m model) Init() tea.Cmd {
-	// Process list renders right away; ports arrive later via portsMsg.
-	return tea.Batch(pollNowCmd(), portsCmd())
+// exclude adds name to the exclusion set, persists it, and drops any entries
+// currently keyed under that name so the very next published snapshot omits
+// it rather than waiting a full poll cycle.
+func (s *state) exclude(name string) error {
+	s.mu.Lock()
+	if _, ok := s.excluded[name]; !ok {
+		next := make(map[string]struct{}, len(s.excluded)+1)
+		for k, v := range s.excluded {
+			next[k] = v
+		}
+		next[name] = struct{}{}
+		s.excluded = next
+	}
+	for key, n := range s.latestName {
+		if n == name {
+			delete(s.cumulative, key)
+			delete(s.sampleCount, key)
+			delete(s.latestPID, key)
+			delete(s.latestCmd, key)
+			delete(s.latestName, key)
+		}
+	}
+	out := s.out
+	rows := s.rowsLocked()
+	s.mu.Unlock()
+
+	if out != nil {
+		publish(out, rows)
+	}
+	return appendExclusion(s.excludedPath, name)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.offset = m.syncedOffset()
-		return m, nil
+// forget drops a single key's tracked data, e.g. right after killing it so a
+// still-exiting process doesn't reappear for one more tick.
+func (s *state) forget(key string) {
+	s.mu.Lock()
+	delete(s.cumulative, key)
+	delete(s.sampleCount, key)
+	delete(s.latestPID, key)
+	delete(s.latestCmd, key)
+	delete(s.latestName, key)
+	out := s.out
+	rows := s.rowsLocked()
+	s.mu.Unlock()
 
-	case tickMsg:
-		nextCumulative := make(map[string]float64, len(msg.entries))
-		nextSampleCount := make(map[string]int, len(msg.entries))
-		nextPorts := make(map[string][]int, len(m.latestPorts))
-		nextPID := make(map[string]string, len(msg.entries))
-		nextCmd := make(map[string]string, len(msg.entries))
-		nextName := make(map[string]string, len(msg.entries))
-		for _, e := range msg.entries {
-			key := e.key
-			if key == "" {
-				key = e.pid
-			}
-			if key == "" {
-				key = e.name
-			}
-			nextCumulative[key] = m.cumulative[key] + e.cpu
-			nextSampleCount[key] = m.sampleCount[key] + 1
-			// Ports come from the separate lsof poll.
-			if ports := m.portsByPID[e.pid]; len(ports) > 0 {
-				nextPorts[key] = ports
-			}
-			nextPID[key] = e.pid
-			nextCmd[key] = e.cmd
-			nextName[key] = e.name
-		}
-		m.cumulative = nextCumulative
-		m.sampleCount = nextSampleCount
-		m.latestPorts = nextPorts
-		m.latestPID = nextPID
-		m.latestCmd = nextCmd
-		m.latestName = nextName
-		if m.selected != "" {
-			if _, ok := m.latestPID[m.selected]; !ok {
-				m.selected = ""
-			}
-		}
-		m.displayList = m.buildDisplayList()
-		m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
-		m.offset = m.syncedOffset()
-		return m, pollCmd(pollInterval)
-
-	case portsMsg:
-		m.portsByPID = msg.ports
-		m.portsLoaded = true
-		nextPorts := make(map[string][]int, len(msg.ports))
-		for key, pid := range m.latestPID {
-			if ports := msg.ports[pid]; len(ports) > 0 {
-				nextPorts[key] = ports
-			}
-		}
-		m.latestPorts = nextPorts
-		m.displayList = m.buildDisplayList()
-		m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
-		m.offset = m.syncedOffset()
-		return m, portsPollCmd(portsPollInterval)
-
-	case tea.KeyMsg:
-		if m.filtering {
-			return m.updateFiltering(msg)
-		}
-		return m.updateList(msg)
+	if out != nil {
+		publish(out, rows)
 	}
-	return m, nil
 }
 
-func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		return m, tea.Quit
-
-	case tea.KeyUp:
-		if m.cursor > 0 {
-			m.cursor--
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyDown:
-		if m.cursor < len(m.displayList)-1 {
-			m.cursor++
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyEnter:
-		if len(m.displayList) > 0 {
-			m.selected = m.displayList[m.cursor].key
-		}
-
-	case tea.KeyF2:
-		if m.selected != "" {
-			if pid, err := strconv.Atoi(m.latestPID[m.selected]); err == nil {
-				syscall.Kill(pid, syscall.SIGKILL)
-			}
-			delete(m.cumulative, m.selected)
-			delete(m.sampleCount, m.selected)
-			delete(m.latestPorts, m.selected)
-			delete(m.latestPID, m.selected)
-			delete(m.latestCmd, m.selected)
-			delete(m.latestName, m.selected)
-			m.selected = ""
-			m.displayList = m.buildDisplayList()
-			m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyF3:
-		if m.selected != "" {
-			if cmd, ok := m.latestCmd[m.selected]; ok && cmd != "" {
-				c := exec.Command("pbcopy")
-				c.Stdin = strings.NewReader(cmd)
-				c.Run()
-			}
-		}
-
-	case tea.KeyF1:
-		if m.selected != "" {
-			name := m.selectedProcessName()
-			if name == "" {
-				break
-			}
-			next := make(map[string]struct{}, len(m.excluded)+1)
-			for k, v := range m.excluded {
-				next[k] = v
-			}
-			next[name] = struct{}{}
-			m.excluded = next
-			if err := appendExclusion(m.excludedPath, name); err != nil {
-				fmt.Fprintf(os.Stderr, "currentps: failed to persist exclusion: %v\n", err)
-			}
-			m.selected = ""
-			m.displayList = m.buildDisplayList()
-			m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyEsc:
-		if m.selected != "" {
-			m.selected = ""
-		}
-
-	case tea.KeyRunes:
-		switch msg.String() {
-		case "q":
-			return m, tea.Quit
-		case "/":
-			m.filtering = true
-		}
-	}
-	return m, nil
+// rows builds the current sorted, exclusion-filtered snapshot as chicle.Rows.
+func (s *state) rows() []chicle.Row {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rowsLocked()
 }
 
-func (m model) updateFiltering(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		return m, tea.Quit
-
-	case tea.KeyEsc:
-		m.filtering = false
-		m.filter = ""
-		m.displayList = m.buildDisplayList()
-		m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
-		m.offset = m.syncedOffset()
-
-	case tea.KeyEnter:
-		if len(m.displayList) > 0 {
-			m.selected = m.displayList[m.cursor].key
-			m.filtering = false
-		}
-
-	case tea.KeyUp:
-		if m.cursor > 0 {
-			m.cursor--
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyDown:
-		if m.cursor < len(m.displayList)-1 {
-			m.cursor++
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyCtrlW:
-		if len(m.filter) > 0 {
-			m.filter = ""
-			m.displayList = m.buildDisplayList()
-			m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyBackspace:
-		if len(m.filter) > 0 {
-			r := []rune(m.filter)
-			m.filter = string(r[:len(r)-1])
-			m.displayList = m.buildDisplayList()
-			m.cursor = clamp(m.cursor, 0, len(m.displayList)-1)
-			m.offset = m.syncedOffset()
-		}
-
-	case tea.KeyRunes:
-		m.filter += msg.String()
-		m.displayList = m.buildDisplayList()
-		m.cursor = 0
-		m.offset = 0
-	}
-	return m, nil
-}
-
-func (m model) View() string {
-	var sb strings.Builder
-
-	title := "currentps"
-	if m.filtering {
-		title += fmt.Sprintf("   [filter: %s_]", m.filter)
-	}
-	if m.selected != "" {
-		title += fmt.Sprintf("   selected: %s", selectedStyle.Render(m.selectedProcessName()))
-	}
-	title += fmt.Sprintf("   excluded: %d", len(m.excluded))
-	if !m.portsLoaded {
-		title += "   " + loadingStyle.Render("⏳ loading ports…")
-	}
-	sb.WriteString(headerStyle.Render(title))
-	sb.WriteString("\n")
-	sb.WriteString(dividerStyle.Render(strings.Repeat("─", 52)))
-	sb.WriteString("\n")
-
-	const (
-		nameWidth = 25
-		// prefix(2) + cpu(9) + sep(2) + pid(7) + sep(2) + port(6) + sep(2) + name(25) + sep(2)
-		fixedWidth = 2 + 9 + 2 + 7 + 2 + portColumnWidth + 2 + nameWidth + 2
-	)
-	cmdWidth := m.width - fixedWidth
-	if cmdWidth < 10 {
-		cmdWidth = 10
-	}
-
-	header := fmt.Sprintf("  %-9s  %-7s  %-*s  %-*s  %s", "Avg CPU%", "PID", portColumnWidth, "Port", nameWidth, "Process Name", "Command")
-	sb.WriteString(headerStyle.Render(header))
-	sb.WriteString("\n")
-
-	end := m.offset + m.viewHeight()
-	if end > len(m.displayList) {
-		end = len(m.displayList)
-	}
-	for i := m.offset; i < end; i++ {
-		p := m.displayList[i]
-		prefix := "  "
-		ports := formatPorts(p.ports)
-		if !m.portsLoaded {
-			ports = "…"
-		}
-		line := fmt.Sprintf("%8.1f%%  %-7s  %-*s  %-*s  %s", p.cpu, p.pid, portColumnWidth, ports, nameWidth, p.name, truncateLeft(p.cmd, cmdWidth))
-		switch {
-		case p.key == m.selected:
-			prefix = "★ "
-			line = selectedStyle.Render(line)
-		case i == m.cursor:
-			prefix = "▶ "
-			line = cursorStyle.Render(line)
-		}
-		sb.WriteString(prefix + line + "\n")
-	}
-
-	sb.WriteString(dividerStyle.Render(strings.Repeat("─", 52)))
-	sb.WriteString("\n")
-	var help string
-	switch {
-	case m.selected != "":
-		help = "↑↓ navigate  F1 exclude  F2 kill  F3 copy cmd  Esc deselect  q quit"
-	case m.filtering:
-		help = "↑↓ navigate  Enter select  type to filter  Backspace  Esc exit filter"
-	default:
-		help = "↑↓ navigate  Enter select  / filter  q quit"
-	}
-	sb.WriteString(helpStyle.Render(help))
-
-	return sb.String()
-}
-
-func (m model) buildDisplayList() []procEntry {
+// rowsLocked is rows() for callers that already hold mu.
+func (s *state) rowsLocked() []chicle.Row {
 	type kv struct {
-		key   string
-		name  string
-		cmd   string
-		cpu   float64
-		ports []int
-		pid   string
+		key, name, cmd, pid string
+		cpu                 float64
+		ports               []int
 	}
-	filterLower := strings.ToLower(m.filter)
-	all := make([]kv, 0, len(m.cumulative))
-	for key, sum := range m.cumulative {
-		name := m.latestName[key]
+	all := make([]kv, 0, len(s.cumulative))
+	for key, sum := range s.cumulative {
+		name := s.latestName[key]
 		if name == "" {
 			name = key
 		}
-		if _, ok := m.excluded[name]; ok {
+		if _, ok := s.excluded[name]; ok {
 			continue
 		}
-		ports := m.latestPorts[key]
-		if filterLower != "" && !matchesFilter(name, m.latestCmd[key], ports, filterLower, m.latestPID[key]) {
-			continue
-		}
-		cpu := sum / float64(m.sampleCount[key])
-		all = append(all, kv{key, name, m.latestCmd[key], cpu, ports, m.latestPID[key]})
+		pid := s.latestPID[key]
+		all = append(all, kv{
+			key:   key,
+			name:  name,
+			cmd:   s.latestCmd[key],
+			pid:   pid,
+			cpu:   sum / float64(s.sampleCount[key]),
+			ports: s.portsByPID[pid],
+		})
 	}
+	// CPU desc, then name, then pid — same order as the old buildDisplayList.
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].cpu == all[j].cpu {
 			if all[i].name == all[j].name {
@@ -420,67 +203,136 @@ func (m model) buildDisplayList() []procEntry {
 		}
 		return all[i].cpu > all[j].cpu
 	})
-	result := make([]procEntry, len(all))
-	for i, kv := range all {
-		result[i] = procEntry{key: kv.key, name: kv.name, cmd: kv.cmd, cpu: kv.cpu, ports: kv.ports, pid: kv.pid}
+
+	rows := make([]chicle.Row, len(all))
+	for i, e := range all {
+		ports := "…"
+		if s.portsLoaded {
+			ports = formatPorts(e.ports)
+		}
+		rows[i] = chicle.Row{
+			Key:  e.key,
+			Cols: []string{fmt.Sprintf("%.1f%%", e.cpu), e.pid, ports, e.name, e.cmd},
+		}
 	}
-	return result
+	return rows
 }
 
-func (m model) selectedProcessName() string {
-	if m.selected == "" {
+// targets is what an action operates on: every ticked row, or just the
+// cursor row when nothing is ticked, so the common single-target case needs
+// no extra keypress.
+func targets(sel chicle.Selection) []chicle.Row {
+	if len(sel.Ticked) > 0 {
+		return sel.Ticked
+	}
+	if sel.Cursor.Key == "" {
+		return nil
+	}
+	return []chicle.Row{sel.Cursor}
+}
+
+// Row.Cols index, matching the Columns order built in main.go.
+const (
+	colCPU = iota
+	colPID
+	colPort
+	colName
+	colCmd
+)
+
+func actions(st *state) []chicle.Action {
+	return []chicle.Action{
+		{Label: "Exclude", Key: "f1", Run: excludeAction(st)},
+		{Label: "Kill", Key: "f2", Confirm: killConfirm, Run: killAction(st)},
+		{Label: "Copy cmd", Key: "f3", Run: copyAction},
+		{Label: "Quit"},
+	}
+}
+
+func excludeAction(st *state) func(chicle.Selection) chicle.Outcome {
+	return func(sel chicle.Selection) chicle.Outcome {
+		ts := targets(sel)
+		if len(ts) == 0 {
+			return chicle.Outcome{}
+		}
+		seen := make(map[string]struct{}, len(ts))
+		var names []string
+		for _, r := range ts {
+			name := r.Cols[colName]
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			if err := st.exclude(name); err != nil {
+				fmt.Fprintf(os.Stderr, "currentps: failed to persist exclusion: %v\n", err)
+			}
+			names = append(names, name)
+		}
+		return chicle.Outcome{Status: "Excluded: " + strings.Join(names, ", ")}
+	}
+}
+
+func killConfirm(sel chicle.Selection) string {
+	ts := targets(sel)
+	switch len(ts) {
+	case 0:
 		return ""
+	case 1:
+		return fmt.Sprintf("Kill %s (pid %s)?", ts[0].Cols[colName], ts[0].Cols[colPID])
+	default:
+		return fmt.Sprintf("Kill %d processes?", len(ts))
 	}
-	for _, p := range m.displayList {
-		if p.key == m.selected {
-			return p.name
+}
+
+func killAction(st *state) func(chicle.Selection) chicle.Outcome {
+	return func(sel chicle.Selection) chicle.Outcome {
+		ts := targets(sel)
+		var killed, failed []string
+		for _, r := range ts {
+			pid, err := strconv.Atoi(r.Cols[colPID])
+			if err != nil {
+				failed = append(failed, r.Cols[colName])
+				continue
+			}
+			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+				failed = append(failed, r.Cols[colName])
+				continue
+			}
+			st.forget(r.Key)
+			killed = append(killed, r.Cols[colName])
+		}
+		var status string
+		if len(killed) > 0 {
+			status = "Killed: " + strings.Join(killed, ", ")
+		}
+		if len(failed) > 0 {
+			if status != "" {
+				status += "; "
+			}
+			status += "failed: " + strings.Join(failed, ", ")
+		}
+		return chicle.Outcome{Status: status}
+	}
+}
+
+func copyAction(sel chicle.Selection) chicle.Outcome {
+	ts := targets(sel)
+	if len(ts) == 0 {
+		return chicle.Outcome{}
+	}
+	var cmds []string
+	for _, r := range ts {
+		if r.Cols[colCmd] != "" {
+			cmds = append(cmds, r.Cols[colCmd])
 		}
 	}
-	if name := m.latestName[m.selected]; name != "" {
-		return name
+	if len(cmds) == 0 {
+		return chicle.Outcome{Status: "Nothing to copy"}
 	}
-	return m.selected
-}
-
-func matchesFilter(name string, cmd string, ports []int, filterLower, pid string) bool {
-	if strings.Contains(strings.ToLower(filterProcessName(name, pid)), filterLower) {
-		return true
+	c := exec.Command("pbcopy")
+	c.Stdin = strings.NewReader(strings.Join(cmds, "\n"))
+	if err := c.Run(); err != nil {
+		return chicle.Outcome{Status: fmt.Sprintf("copy failed: %v", err)}
 	}
-	if strings.Contains(strings.ToLower(cmd), filterLower) {
-		return true
-	}
-	for _, p := range ports {
-		if strings.Contains(fmt.Sprintf("%d", p), filterLower) {
-			return true
-		}
-	}
-	return false
-}
-
-func filterProcessName(name, pid string) string {
-	if pid == "" {
-		return name
-	}
-	return strings.TrimSuffix(name, fmt.Sprintf(" (%s)", pid))
-}
-
-func truncateLeft(s string, maxLen int) string {
-	r := []rune(s)
-	if len(r) <= maxLen {
-		return s
-	}
-	return "…" + string(r[len(r)-maxLen+1:])
-}
-
-func clamp(v, lo, hi int) int {
-	if hi < 0 {
-		return 0
-	}
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
+	return chicle.Outcome{Status: fmt.Sprintf("Copied %d command(s)", len(cmds))}
 }

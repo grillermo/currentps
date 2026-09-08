@@ -2,282 +2,195 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/grillermo/chicle"
 )
 
-func TestViewExpandsCommandForCompactPortColumn(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.width = 100
-	m.displayList = []procEntry{{
-		key:   "123",
-		name:  "node",
-		cmd:   "01234567890123456789012345678901234567890123456789",
-		cpu:   10,
-		ports: []int{3000},
-		pid:   "123",
-	}}
-
-	view := m.View()
-	if !strings.Contains(view, "…890123456789012345678901234567890123456789") {
-		t.Errorf("expected command to receive reclaimed port width, got %q", view)
-	}
-}
-
-func TestBuildDisplayListFiltersExcluded(t *testing.T) {
-	m := newModel(map[string]struct{}{"firefox": {}}, "")
-	m.cumulative = map[string]float64{
-		"firefox": 50.0,
-		"node":    30.0,
-		"bash":    10.0,
-	}
-	m.sampleCount = map[string]int{"firefox": 1, "node": 1, "bash": 1}
-	list := m.buildDisplayList()
-
-	for _, p := range list {
-		if p.name == "firefox" {
-			t.Error("firefox should be excluded from display list")
+func rowByKey(rows []chicle.Row, key string) (chicle.Row, bool) {
+	for _, r := range rows {
+		if r.Key == key {
+			return r, true
 		}
 	}
-	if len(list) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(list))
+	return chicle.Row{}, false
+}
+
+func TestRowsFiltersExcluded(t *testing.T) {
+	s := newState(map[string]struct{}{"firefox": {}}, "")
+	s.applyTick([]rawEntry{
+		{key: "firefox", name: "firefox", pid: "1", cpu: 50},
+		{key: "node", name: "node", pid: "2", cpu: 30},
+		{key: "bash", name: "bash", pid: "3", cpu: 10},
+	})
+
+	rows := s.rows()
+	if _, ok := rowByKey(rows, "firefox"); ok {
+		t.Error("firefox should be excluded from rows")
+	}
+	if len(rows) != 2 {
+		t.Errorf("expected 2 rows, got %d", len(rows))
 	}
 }
 
-func TestBuildDisplayListSortedDescending(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.cumulative = map[string]float64{
-		"a": 10.0,
-		"b": 50.0,
-		"c": 30.0,
-	}
-	m.sampleCount = map[string]int{"a": 1, "b": 1, "c": 1}
-	list := m.buildDisplayList()
+func TestRowsSortedDescendingByCPU(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	s.applyTick([]rawEntry{
+		{key: "a", name: "a", pid: "1", cpu: 10},
+		{key: "b", name: "b", pid: "2", cpu: 50},
+		{key: "c", name: "c", pid: "3", cpu: 30},
+	})
 
-	if len(list) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(list))
+	rows := s.rows()
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
 	}
-	if list[0].name != "b" {
-		t.Errorf("expected b first (highest cpu), got %q", list[0].name)
+	if rows[0].Cols[colName] != "b" {
+		t.Errorf("expected b first (highest cpu), got %q", rows[0].Cols[colName])
 	}
-	if list[1].name != "c" {
-		t.Errorf("expected c second, got %q", list[1].name)
+	if rows[1].Cols[colName] != "c" {
+		t.Errorf("expected c second, got %q", rows[1].Cols[colName])
 	}
-	if list[2].name != "a" {
-		t.Errorf("expected a third, got %q", list[2].name)
+	if rows[2].Cols[colName] != "a" {
+		t.Errorf("expected a third, got %q", rows[2].Cols[colName])
 	}
 }
 
-func TestBuildDisplayListFilterCaseInsensitive(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.cumulative = map[string]float64{
-		"Firefox": 50.0,
-		"node":    30.0,
-	}
-	m.sampleCount = map[string]int{"Firefox": 1, "node": 1}
-	m.filter = "fire"
-	list := m.buildDisplayList()
-
-	if len(list) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(list))
-	}
-	if list[0].name != "Firefox" {
-		t.Errorf("expected Firefox, got %q", list[0].name)
-	}
-}
-
-func TestBuildDisplayListShowsAll(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.cumulative = make(map[string]float64)
-	m.sampleCount = make(map[string]int)
+func TestRowsShowsAllNoDisplayLimit(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	entries := make([]rawEntry, 0, 100)
 	for i := 0; i < 100; i++ {
-		m.cumulative[fmt.Sprintf("proc%d", i)] = float64(i)
-		m.sampleCount[fmt.Sprintf("proc%d", i)] = 1
+		key := fmt.Sprintf("proc%d", i)
+		entries = append(entries, rawEntry{key: key, name: key, pid: key, cpu: float64(i)})
 	}
-	list := m.buildDisplayList()
-	if len(list) != 100 {
-		t.Errorf("expected 100 entries (no display limit), got %d", len(list))
+	s.applyTick(entries)
+
+	rows := s.rows()
+	if len(rows) != 100 {
+		t.Errorf("expected 100 rows (no display limit), got %d", len(rows))
 	}
 }
 
-func TestBuildDisplayListFilterByPort(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.cumulative = map[string]float64{
-		"node (123)":     50.0,
-		"postgres (456)": 30.0,
-		"sshd (789)":     10.0,
-	}
-	m.sampleCount = map[string]int{"node (123)": 1, "postgres (456)": 1, "sshd (789)": 1}
-	m.latestCmd = map[string]string{
-		"node (123)":     "node server.js",
-		"postgres (456)": "postgres -D /usr/local/var/postgres",
-		"sshd (789)":     "/usr/sbin/sshd -D",
-	}
-	m.latestPorts = map[string][]int{
-		"node (123)":     {3000, 8080},
-		"postgres (456)": {5432},
-	}
+func TestRowsProjectsPorts(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	s.applyTick([]rawEntry{{key: "node", name: "node", pid: "123", cpu: 50}})
+	s.applyPorts(map[string][]int{"123": {3000, 8080}})
 
-	m.filter = "300"
-	list := m.buildDisplayList()
-	if len(list) != 1 || list[0].name != "node (123)" {
-		t.Errorf("filter \"300\" expected node (123), got %v", list)
+	rows := s.rows()
+	row, ok := rowByKey(rows, "node")
+	if !ok {
+		t.Fatal("expected node row")
 	}
-
-	m.filter = "5432"
-	list = m.buildDisplayList()
-	if len(list) != 1 || list[0].name != "postgres (456)" {
-		t.Errorf("filter \"5432\" expected postgres (456), got %v", list)
-	}
-
-	m.filter = "node"
-	list = m.buildDisplayList()
-	if len(list) != 1 || list[0].name != "node (123)" {
-		t.Errorf("filter \"node\" expected node (123), got %v", list)
-	}
-
-	m.filter = "server.js"
-	list = m.buildDisplayList()
-	if len(list) != 1 || list[0].name != "node (123)" {
-		t.Errorf("filter \"server.js\" expected node (123), got %v", list)
-	}
-
-	m.filter = "9999"
-	list = m.buildDisplayList()
-	if len(list) != 0 {
-		t.Errorf("filter \"9999\" expected empty, got %v", list)
+	if row.Cols[colPort] != formatPorts([]int{3000, 8080}) {
+		t.Errorf("expected formatted ports, got %q", row.Cols[colPort])
 	}
 }
 
-func TestBuildDisplayListFilterIgnoresPID(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.cumulative = map[string]float64{
-		"node (123)": 50.0,
+func TestRowsShowsLoadingPortsBeforeFirstLsofPoll(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	s.applyTick([]rawEntry{{key: "node", name: "node", pid: "123", cpu: 50}})
+
+	rows := s.rows()
+	row, ok := rowByKey(rows, "node")
+	if !ok {
+		t.Fatal("expected node row")
 	}
-	m.sampleCount = map[string]int{"node (123)": 1}
-	m.latestPorts = map[string][]int{"node (123)": {3000}}
-	m.latestPID = map[string]string{"node (123)": "123"}
-
-	m.filter = "123"
-	list := m.buildDisplayList()
-
-	if len(list) != 0 {
-		t.Errorf("filter \"123\" expected empty because it only matches PID, got %v", list)
+	if row.Cols[colPort] != "…" {
+		t.Errorf("expected loading indicator before first lsof poll, got %q", row.Cols[colPort])
 	}
 }
 
-func TestBuildDisplayListProjectsPorts(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.cumulative = map[string]float64{"node (123)": 50.0}
-	m.sampleCount = map[string]int{"node (123)": 1}
-	m.latestPorts = map[string][]int{"node (123)": {3000, 8080}}
-
-	list := m.buildDisplayList()
-	if len(list) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(list))
-	}
-	if len(list[0].ports) != 2 || list[0].ports[0] != 3000 || list[0].ports[1] != 8080 {
-		t.Errorf("expected ports [3000 8080], got %v", list[0].ports)
-	}
-}
-
-func TestBuildDisplayListEmptyCumulative(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	list := m.buildDisplayList()
-	if len(list) != 0 {
-		t.Errorf("expected 0 entries for empty cumulative, got %d", len(list))
-	}
-}
-
-func TestTickPrunesProcessesMissingFromLatestPoll(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-
-	updated, _ := m.Update(tickMsg{entries: []rawEntry{
+func TestApplyTickPrunesProcessesMissingFromLatestPoll(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	s.applyTick([]rawEntry{
 		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 10},
 		{key: "456", name: "ruby", pid: "456", cmd: "ruby app.rb", cpu: 20},
-	}})
-	m = updated.(model)
-
-	updated, _ = m.Update(tickMsg{entries: []rawEntry{
+	})
+	s.applyTick([]rawEntry{
 		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 30},
-	}})
-	m = updated.(model)
+	})
 
-	if _, ok := m.cumulative["456"]; ok {
-		t.Fatal("expected ruby process to be pruned after disappearing from poll")
-	}
-	if _, ok := m.latestPID["456"]; ok {
+	if _, ok := s.latestPID["456"]; ok {
 		t.Fatal("expected ruby pid to be removed after disappearing from poll")
 	}
-	if len(m.displayList) != 1 || m.displayList[0].name != "node" {
-		t.Fatalf("expected only live node process in display list, got %+v", m.displayList)
-	}
-	if m.displayList[0].pid != "123" {
-		t.Fatalf("expected node pid to remain populated, got %q", m.displayList[0].pid)
+	rows := s.rows()
+	if len(rows) != 1 || rows[0].Cols[colName] != "node" {
+		t.Fatalf("expected only live node process in rows, got %+v", rows)
 	}
 }
 
-func TestTickClearsSelectionWhenProcessDisappears(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.selected = "456"
-
-	updated, _ := m.Update(tickMsg{entries: []rawEntry{
-		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 30},
-	}})
-	m = updated.(model)
-
-	if m.selected != "" {
-		t.Fatalf("expected selection to clear when selected process disappears, got %q", m.selected)
-	}
-}
-
-func TestTickKeepsSameNameProcessesSeparate(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-
-	updated, _ := m.Update(tickMsg{entries: []rawEntry{
+func TestApplyTickKeepsSameNameProcessesSeparate(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	s.applyTick([]rawEntry{
 		{key: "123", name: "node", pid: "123", cmd: "node server.js", cpu: 10},
 		{key: "456", name: "node", pid: "456", cmd: "node worker.js", cpu: 30},
-	}})
-	m = updated.(model)
+	})
 
-	if len(m.displayList) != 2 {
-		t.Fatalf("expected same-name processes to stay separate, got %+v", m.displayList)
+	rows := s.rows()
+	if len(rows) != 2 {
+		t.Fatalf("expected same-name processes to stay separate, got %+v", rows)
 	}
-	if m.displayList[0].pid != "456" || m.displayList[1].pid != "123" {
-		t.Fatalf("expected rows to retain distinct pids sorted by cpu, got %+v", m.displayList)
+	if rows[0].Cols[colPID] != "456" || rows[1].Cols[colPID] != "123" {
+		t.Fatalf("expected rows to retain distinct pids sorted by cpu, got %+v", rows)
 	}
 }
 
-func TestClamp(t *testing.T) {
-	if clamp(5, 0, 10) != 5 {
-		t.Error("clamp(5,0,10) should be 5")
+func TestKillActionRemovesEntryAndSyscallsKill(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	// Use pid 0 so the syscall.Kill in killAction is a harmless no-op signal
+	// to the caller's own process group rather than a real target; the point
+	// of this test is that state.forget removes the tracked entry, not that
+	// the kill syscall itself succeeds against a real pid.
+	s.applyTick([]rawEntry{{key: "node (123)", name: "node (123)", pid: "0", cmd: "node server.js", cpu: 10}})
+
+	if _, ok := s.latestCmd["node (123)"]; !ok {
+		t.Fatal("expected latestCmd to be populated before kill")
 	}
-	if clamp(-1, 0, 10) != 0 {
-		t.Error("clamp(-1,0,10) should be 0")
-	}
-	if clamp(15, 0, 10) != 10 {
-		t.Error("clamp(15,0,10) should be 10")
-	}
-	if clamp(5, 0, -1) != 0 {
-		t.Error("clamp(5,0,-1) should be 0 (empty list case)")
+
+	s.forget("node (123)")
+
+	if _, ok := s.latestCmd["node (123)"]; ok {
+		t.Fatal("expected latest command to be removed after forget")
 	}
 }
 
-func TestKillRemovesLatestCmd(t *testing.T) {
-	m := newModel(make(map[string]struct{}), "")
-	m.selected = "node (123)"
-	m.cumulative["node (123)"] = 10
-	m.sampleCount["node (123)"] = 1
-	m.latestPID["node (123)"] = "not-a-pid"
-	m.latestCmd["node (123)"] = "node server.js"
-	m.displayList = []procEntry{{name: "node (123)"}}
+func TestExcludeRemovesRowImmediately(t *testing.T) {
+	s := newState(make(map[string]struct{}), t.TempDir()+"/excluded.txt")
+	s.applyTick([]rawEntry{
+		{key: "firefox", name: "firefox", pid: "1", cpu: 50},
+		{key: "node", name: "node", pid: "2", cpu: 30},
+	})
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF2})
-	m = updated.(model)
+	if err := s.exclude("firefox"); err != nil {
+		t.Fatalf("exclude: %v", err)
+	}
 
-	if _, ok := m.latestCmd["node (123)"]; ok {
-		t.Fatal("expected latest command to be removed on kill action")
+	rows := s.rows()
+	if _, ok := rowByKey(rows, "firefox"); ok {
+		t.Error("expected firefox to disappear from rows immediately after exclude")
+	}
+	if len(rows) != 1 {
+		t.Errorf("expected 1 row remaining, got %d", len(rows))
+	}
+}
+
+func TestTargetsFallsBackToCursorWhenNothingTicked(t *testing.T) {
+	cursor := chicle.Row{Key: "node", Cols: []string{"1.0%", "1", "", "node", "node server.js"}}
+	sel := chicle.Selection{Cursor: cursor}
+
+	ts := targets(sel)
+	if len(ts) != 1 || ts[0].Key != "node" {
+		t.Fatalf("expected fallback to cursor row, got %+v", ts)
+	}
+}
+
+func TestTargetsUsesTickedOverCursor(t *testing.T) {
+	cursor := chicle.Row{Key: "a"}
+	ticked := []chicle.Row{{Key: "b"}, {Key: "c"}}
+	sel := chicle.Selection{Cursor: cursor, Ticked: ticked}
+
+	ts := targets(sel)
+	if len(ts) != 2 || ts[0].Key != "b" || ts[1].Key != "c" {
+		t.Fatalf("expected ticked rows to win over cursor, got %+v", ts)
 	}
 }

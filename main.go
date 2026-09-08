@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/grillermo/chicle"
 )
 
 const excludedFilePath = "./currentps_excluded.txt"
@@ -26,9 +26,23 @@ func main() {
 		excluded = make(map[string]struct{})
 	}
 
-	m := newModel(excluded, excludedFilePath)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	st := newState(excluded, excludedFilePath)
+
+	// Nothing about this program produces a picked value: it runs until
+	// quit. The result is ignored on success, same as any other error path.
+	if _, err := chicle.Run(chicle.Config{
+		Title: "currentps",
+		Columns: []chicle.Column{
+			{Title: "Avg CPU%", Width: 9},
+			{Title: "PID", Width: 7},
+			{Title: "Port", Width: portColumnWidth},
+			{Title: "Process Name", Width: 25},
+			{Title: "Command"},
+		},
+		MultiSelect: true,
+		Actions:     actions(st),
+		Updates:     pollLoop(st),
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
