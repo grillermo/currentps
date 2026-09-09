@@ -9,6 +9,11 @@ import (
 
 const excludedFilePath = "./currentps_excluded.txt"
 
+// cpuColumnWidth must match the "Avg CPU%" column's Width below — rowsLocked
+// right-pads the CPU string to this width itself, since chicle's pad() only
+// ever left-justifies.
+const cpuColumnWidth = 9
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -33,7 +38,7 @@ func main() {
 	if _, err := chicle.Run(chicle.Config{
 		Title: "currentps",
 		Columns: []chicle.Column{
-			{Title: "Avg CPU%", Width: 9},
+			{Title: "Avg CPU%", Width: cpuColumnWidth},
 			{Title: "PID", Width: 7},
 			{Title: "Port", Width: portColumnWidth},
 			{Title: "Process Name", Width: 25},

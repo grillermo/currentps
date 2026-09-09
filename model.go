@@ -60,6 +60,8 @@ type state struct {
 	// call instead of signaling a real (or, worse, wrong) pid — pid 0 is not
 	// a safe stand-in: per kill(2), pid 0 signals every process in the
 	// caller's own process group, which can take down the test's own shell.
+	// Must only be set once, before pollLoop starts — reads in killAction
+	// are unlocked and assume no concurrent reassignment.
 	kill func(pid int) error
 }
 
@@ -218,9 +220,12 @@ func (s *state) rowsLocked() []chicle.Row {
 		if s.portsLoaded {
 			ports = formatPorts(e.ports)
 		}
+		// chicle's pad() always left-justifies; right-pad here so CPU% reads
+		// as a right-aligned numeric column instead.
+		cpuStr := fmt.Sprintf("%*s", cpuColumnWidth, fmt.Sprintf("%.1f%%", e.cpu))
 		rows[i] = chicle.Row{
 			Key:  e.key,
-			Cols: []string{fmt.Sprintf("%.1f%%", e.cpu), e.pid, ports, e.name, e.cmd},
+			Cols: []string{cpuStr, e.pid, ports, e.name, e.cmd},
 		}
 	}
 	return rows
