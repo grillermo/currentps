@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
+	"syscall"
 	"testing"
 
 	"github.com/grillermo/chicle"
@@ -135,23 +138,91 @@ func TestApplyTickKeepsSameNameProcessesSeparate(t *testing.T) {
 	}
 }
 
-func TestKillActionRemovesEntryAndSyscallsKill(t *testing.T) {
+// TestKillActionCallsKillerWithRealPidAndForgetsOnSuccess exercises
+// killAction's own logic — parsing Cols[colPID], calling the injected killer,
+// and forgetting the entry only once the kill succeeds — without signaling a
+// real process. state.kill is swapped for a fake that just records calls;
+// the real syscall.Kill wrapper is a one-line pass-through (see newState) and
+// is exercised by TestRealKillerSignalsARealChildProcess below instead of
+// here, where a wrong or accidental pid would be a real footgun.
+func TestKillActionCallsKillerWithRealPidAndForgetsOnSuccess(t *testing.T) {
 	s := newState(make(map[string]struct{}), "")
-	// Use pid 0 so the syscall.Kill in killAction is a harmless no-op signal
-	// to the caller's own process group rather than a real target; the point
-	// of this test is that state.forget removes the tracked entry, not that
-	// the kill syscall itself succeeds against a real pid.
-	s.applyTick([]rawEntry{{key: "node (123)", name: "node (123)", pid: "0", cmd: "node server.js", cpu: 10}})
+	s.applyTick([]rawEntry{{key: "node (123)", name: "node (123)", pid: "123", cmd: "node server.js", cpu: 10}})
+
+	var gotPID int
+	var calls int
+	s.kill = func(pid int) error {
+		calls++
+		gotPID = pid
+		return nil
+	}
+
+	outcome := killAction(s)(chicle.Selection{Cursor: mustRow(t, s, "node (123)")})
+
+	if calls != 1 {
+		t.Fatalf("expected killer to be called once, got %d", calls)
+	}
+	if gotPID != 123 {
+		t.Fatalf("expected killer called with pid 123, got %d", gotPID)
+	}
+	if _, ok := s.latestCmd["node (123)"]; ok {
+		t.Fatal("expected latest command to be removed after a successful kill")
+	}
+	if outcome.Status == "" || outcome.Done {
+		t.Fatalf("expected a non-empty status and Done=false, got %+v", outcome)
+	}
+}
+
+// TestKillActionDoesNotForgetOnKillerFailure guards the failure path: a
+// process the killer failed to signal must not be silently dropped from
+// tracking, or the user would lose the row without the kill having happened.
+func TestKillActionDoesNotForgetOnKillerFailure(t *testing.T) {
+	s := newState(make(map[string]struct{}), "")
+	s.applyTick([]rawEntry{{key: "node (123)", name: "node (123)", pid: "123", cmd: "node server.js", cpu: 10}})
+	s.kill = func(pid int) error { return fmt.Errorf("permission denied") }
+
+	killAction(s)(chicle.Selection{Cursor: mustRow(t, s, "node (123)")})
 
 	if _, ok := s.latestCmd["node (123)"]; !ok {
-		t.Fatal("expected latestCmd to be populated before kill")
+		t.Fatal("expected entry to remain tracked when the kill failed")
+	}
+}
+
+// TestRealKillerSignalsARealChildProcess exercises the production kill field
+// (syscall.Kill via newState) end to end, against a real short-lived child
+// process spawned just for this test — never against pid 0 or any pid this
+// test does not own.
+func TestRealKillerSignalsARealChildProcess(t *testing.T) {
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start dummy child process: %v", err)
 	}
 
-	s.forget("node (123)")
-
-	if _, ok := s.latestCmd["node (123)"]; ok {
-		t.Fatal("expected latest command to be removed after forget")
+	s := newState(make(map[string]struct{}), "")
+	if err := s.kill(cmd.Process.Pid); err != nil {
+		t.Fatalf("kill: %v", err)
 	}
+
+	err := cmd.Wait()
+	if err == nil {
+		t.Fatal("expected the killed child process to exit with an error status")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an *exec.ExitError, got %T: %v", err, err)
+	}
+	if !exitErr.Sys().(syscall.WaitStatus).Signaled() {
+		t.Fatalf("expected the child to have been killed by a signal, got status %v", exitErr.Sys())
+	}
+}
+
+func mustRow(t *testing.T, s *state, key string) chicle.Row {
+	t.Helper()
+	row, ok := rowByKey(s.rows(), key)
+	if !ok {
+		t.Fatalf("expected a row for key %q", key)
+	}
+	return row
 }
 
 func TestExcludeRemovesRowImmediately(t *testing.T) {

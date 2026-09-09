@@ -54,6 +54,13 @@ type state struct {
 
 	excluded     map[string]struct{}
 	excludedPath string
+
+	// kill sends the actual signal. It is a field rather than a direct
+	// syscall.Kill call so tests can substitute a fake that just records the
+	// call instead of signaling a real (or, worse, wrong) pid — pid 0 is not
+	// a safe stand-in: per kill(2), pid 0 signals every process in the
+	// caller's own process group, which can take down the test's own shell.
+	kill func(pid int) error
 }
 
 func newState(excluded map[string]struct{}, excludedPath string) *state {
@@ -66,6 +73,7 @@ func newState(excluded map[string]struct{}, excludedPath string) *state {
 		portsByPID:   make(map[string][]int),
 		excluded:     excluded,
 		excludedPath: excludedPath,
+		kill:         func(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) },
 	}
 }
 
@@ -294,7 +302,7 @@ func killAction(st *state) func(chicle.Selection) chicle.Outcome {
 				failed = append(failed, r.Cols[colName])
 				continue
 			}
-			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			if err := st.kill(pid); err != nil {
 				failed = append(failed, r.Cols[colName])
 				continue
 			}
