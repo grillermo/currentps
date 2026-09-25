@@ -1,4 +1,3 @@
-top_cpu
-top_cpu_excluded.txt
+currentps_excluded.txt
 .DS_Store
 docs/superpowers
