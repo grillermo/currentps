@@ -1,5 +1,3 @@
-@/Users/grillermo/.codex/RTK.md
-
 # currentps Agent Notes
 
 ## Project Summary
@@ -18,13 +16,11 @@ processes listening on that port.
 
 ## Development Commands
 
-Run all commands through `rtk`.
-
 ```sh
-rtk go test ./...
-rtk gofmt -w .
-rtk go build -o /tmp/currentps-build-check .
-rtk ./currentps
+go test ./...
+gofmt -w .
+go build -o /tmp/currentps-build-check .
+./currentps
 ```
 
 ## Code Organization
@@ -53,6 +49,6 @@ rtk ./currentps
 
 ## Verification
 
-- Run `rtk go test ./...` after behavior changes.
-- Run `rtk go build -o /tmp/currentps-build-check .` after changes that affect startup, dependencies, or OS command integration.
+- Run `go test ./...` after behavior changes.
+- Run `go build -o /tmp/currentps-build-check .` after changes that affect startup, dependencies, or OS command integration.
 - If rendering changes, inspect model `View()` output through focused tests where practical.
