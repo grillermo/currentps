@@ -163,7 +163,7 @@ func fetchProcesses() tickMsg {
 // always had — ps every pollInterval, lsof every portsPollInterval — and
 // merges their output into a single stream of sorted chicle.Row snapshots,
 // each already filtered against st's exclusion set. That filtering has to
-// happen here rather than via chicle's own "/" filter: a process that is
+// happen here rather than via chicle's own filter: a process that is
 // excluded must never reach the channel at all, not be sent and then hidden,
 // so it can never flash on screen even for one frame.
 //

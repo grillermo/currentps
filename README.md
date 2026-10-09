@@ -57,12 +57,24 @@ cancelled or a kill fails, `2` on a bad argument.
 
 ## Keybindings
 
-| Key        | Action                        |
-|------------|-------------------------------|
-| `↑` / `↓` | Navigate list                 |
-| `Enter`    | Select process                |
-| `/`        | Start filtering               |
-| `Esc`      | Deselect / exit filter        |
-| `F1`       | Exclude selected (persistent) |
-| `F2`       | Kill selected process (SIGKILL) |
-| `q` / `Ctrl+C` | Quit                    |
+There is no separate filter mode: printable keys always type into the filter
+query (name, PID or port). `/`, `j`, `k`, `q`, `a`, `n` and `x` are ordinary
+characters.
+
+| Key                 | Action                                        |
+|---------------------|-----------------------------------------------|
+| any printable key   | Type into the filter                          |
+| `↑` / `↓`           | Navigate list                                 |
+| `Enter`             | Toggle the process under the cursor           |
+| `Ctrl+A`            | Tick all visible (unfiltered) processes       |
+| `Ctrl+X`            | Untick all visible processes                  |
+| `Tab` / `Shift+Tab` | Move between the list and the action buttons  |
+| `Enter` (on button) | Run the focused button                        |
+| `F1`                | Exclude ticked (persistent)                   |
+| `F2`                | Kill ticked processes (SIGKILL)               |
+| `F3`                | Copy command                                  |
+| `Esc`               | Clear the filter if set, else quit            |
+| `Ctrl+C`            | Quit                                          |
+
+Focus starts on the list; `Space` types into the filter rather than ticking.
+Press `Tab` to reach the Exclude / Kill / Copy cmd / Quit buttons.
