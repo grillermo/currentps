@@ -54,7 +54,7 @@ func TestFindPortTargetsNoMatch(t *testing.T) {
 }
 
 func TestKillModelSelectsAllByDefault(t *testing.T) {
-	m := newKillModel(11434, []killTarget{{pid: "100"}, {pid: "200"}})
+	m := newKillModel("port 11434", []killTarget{{pid: "100"}, {pid: "200"}})
 
 	if len(m.selectedTargets()) != 2 {
 		t.Fatalf("expected every target selected by default, got %+v", m.selectedTargets())
@@ -62,7 +62,7 @@ func TestKillModelSelectsAllByDefault(t *testing.T) {
 }
 
 func TestKillModelSpaceDeselects(t *testing.T) {
-	m := newKillModel(11434, []killTarget{{pid: "100"}, {pid: "200"}})
+	m := newKillModel("port 11434", []killTarget{{pid: "100"}, {pid: "200"}})
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	updated, _ = updated.(killModel).Update(tea.KeyMsg{Type: tea.KeySpace})
@@ -78,7 +78,7 @@ func TestKillModelSpaceDeselects(t *testing.T) {
 }
 
 func TestKillModelToggleAll(t *testing.T) {
-	m := newKillModel(11434, []killTarget{{pid: "100"}, {pid: "200"}})
+	m := newKillModel("port 11434", []killTarget{{pid: "100"}, {pid: "200"}})
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	m = updated.(killModel)
@@ -94,7 +94,7 @@ func TestKillModelToggleAll(t *testing.T) {
 }
 
 func TestKillModelEnterConfirms(t *testing.T) {
-	m := newKillModel(11434, []killTarget{{pid: "100"}})
+	m := newKillModel("port 11434", []killTarget{{pid: "100"}})
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(killModel)
@@ -112,7 +112,7 @@ func TestKillModelEscAndQCancel(t *testing.T) {
 		{Type: tea.KeyEsc},
 		{Type: tea.KeyRunes, Runes: []rune("q")},
 	} {
-		m := newKillModel(11434, []killTarget{{pid: "100"}})
+		m := newKillModel("port 11434", []killTarget{{pid: "100"}})
 		updated, cmd := m.Update(key)
 		m = updated.(killModel)
 
@@ -126,7 +126,7 @@ func TestKillModelEscAndQCancel(t *testing.T) {
 }
 
 func TestKillModelViewShowsTargets(t *testing.T) {
-	m := newKillModel(11434, []killTarget{{pid: "4321", name: "ollama", cmd: "ollama serve", ports: []int{11434}}})
+	m := newKillModel("port 11434", []killTarget{{pid: "4321", name: "ollama", cmd: "ollama serve", ports: []int{11434}}})
 	m.width = 100
 
 	view := m.View()
@@ -139,11 +139,66 @@ func TestKillModelViewShowsTargets(t *testing.T) {
 }
 
 func TestKillModelViewEmptyOnceDone(t *testing.T) {
-	m := newKillModel(11434, []killTarget{{pid: "100", name: "ollama"}})
+	m := newKillModel("port 11434", []killTarget{{pid: "100", name: "ollama"}})
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
 	if view := updated.(killModel).View(); view != "" {
 		t.Errorf("expected the final frame to be blank so the kill summary stands alone, got %q", view)
+	}
+}
+
+func TestFindPatternTargetsGlob(t *testing.T) {
+	ports := map[string][]int{"100": {3000}}
+	entries := []rawEntry{
+		{pid: "100", name: "2.1.310", cmd: "/Users/me/.local/bin/claude --dangerously-skip-permissions"},
+		{pid: "200", name: "Claude Helper", cmd: "/Applications/Claude.app/Contents/Helper"},
+		{pid: "300", name: "zsh", cmd: "zsh -c claude"},
+		{pid: "400", name: "claude", cmd: "claude"},
+	}
+
+	targets := findPatternTargets("claude*", ports, entries, "400")
+
+	if len(targets) != 2 || targets[0].pid != "100" || targets[1].pid != "200" {
+		t.Fatalf("expected pids 100 (argv0 match) and 200 (case-insensitive name), self skipped, got %+v", targets)
+	}
+	if len(targets[0].ports) != 1 || targets[0].ports[0] != 3000 {
+		t.Errorf("expected listening ports attached, got %v", targets[0].ports)
+	}
+}
+
+func TestFindPatternTargetsExactAndClass(t *testing.T) {
+	entries := []rawEntry{
+		{pid: "1", name: "node", cmd: "node a.js"},
+		{pid: "2", name: "nodemon", cmd: "nodemon"},
+		{pid: "3", name: "ruby", cmd: "ruby x.rb"},
+	}
+	if got := findPatternTargets("node", nil, entries, ""); len(got) != 1 || got[0].pid != "1" {
+		t.Errorf("expected a pattern without wildcards to match exactly, got %+v", got)
+	}
+	if got := findPatternTargets("[nr]u*", nil, entries, ""); len(got) != 1 || got[0].pid != "3" {
+		t.Errorf("expected character class match, got %+v", got)
+	}
+}
+
+func TestIsPortArg(t *testing.T) {
+	for _, arg := range []string{"11434", "0", "99999"} {
+		if !isPortArg(arg) {
+			t.Errorf("expected %q to be treated as a port", arg)
+		}
+	}
+	for _, arg := range []string{"", "claude*", "node", "80a", "-1"} {
+		if isPortArg(arg) {
+			t.Errorf("expected %q to be treated as a pattern", arg)
+		}
+	}
+}
+
+func TestParsePatternArg(t *testing.T) {
+	if _, err := parsePatternArg("claude*"); err != nil {
+		t.Errorf("expected valid pattern, got %v", err)
+	}
+	if _, err := parsePatternArg("[claude"); err == nil {
+		t.Error("expected malformed pattern to be rejected")
 	}
 }
 

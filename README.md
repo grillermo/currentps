@@ -52,8 +52,20 @@ the ones you want to keep, then press `Enter` to `SIGKILL` the rest.
 | `Enter`        | Kill the selected processes |
 | `Esc` / `q`    | Cancel without killing     |
 
-Exits `0` when nothing is listening on the port or the kills succeed, `1` when
-cancelled or a kill fails, `2` on a bad argument.
+## Kill everything matching a name
+
+```sh
+currentps kill 'claude*'
+```
+
+Any argument that isn't all digits is a case-insensitive glob (`*`, `?`,
+`[abc]`) matched against each process's name and its argv[0] basename, so
+`claude*` catches Claude Code even though its process name is its version
+number. Quote the pattern so your shell doesn't expand it. `currentps` never
+lists itself. The same confirmation list and keys apply.
+
+Exits `0` when nothing matches or the kills succeed, `1` when
+cancelled or a kill fails, `2` on a bad port or pattern.
 
 ## Keybindings
 

@@ -20,7 +20,7 @@ func main() {
 		case "kill":
 			os.Exit(runKill(os.Args[2:]))
 		default:
-			fmt.Fprintf(os.Stderr, "currentps: unknown command %q\n\nusage:\n  currentps\n  currentps kill <port>\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "currentps: unknown command %q\n\nusage:\n  currentps\n  currentps kill <port|pattern>\n", os.Args[1])
 			os.Exit(2)
 		}
 	}

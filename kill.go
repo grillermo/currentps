@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +54,42 @@ func findPortTargets(port int, portsByPID map[string][]int, entries []rawEntry) 
 		}
 		targets = append(targets, t)
 	}
+	sortTargets(targets)
+	return targets
+}
+
+// findPatternTargets returns every process whose name or argv[0] basename
+// matches the glob pattern, case-insensitively. argv[0] is checked too because
+// some programs (e.g. claude) report a version string as their comm name.
+// selfPID is skipped so `currentps kill 'curr*'` never kills itself.
+func findPatternTargets(pattern string, portsByPID map[string][]int, entries []rawEntry, selfPID string) []killTarget {
+	pattern = strings.ToLower(pattern)
+	var targets []killTarget
+	for _, e := range entries {
+		if e.pid == selfPID || !globMatches(pattern, e.name, argv0Basename(e.cmd)) {
+			continue
+		}
+		name := e.name
+		if name == "" {
+			name = "unknown"
+		}
+		targets = append(targets, killTarget{pid: e.pid, name: name, cmd: e.cmd, ports: portsByPID[e.pid]})
+	}
+	sortTargets(targets)
+	return targets
+}
+
+// globMatches expects a lower-cased, already validated pattern.
+func globMatches(pattern string, candidates ...string) bool {
+	for _, c := range candidates {
+		if ok, _ := path.Match(pattern, strings.ToLower(c)); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func sortTargets(targets []killTarget) {
 	sort.Slice(targets, func(i, j int) bool {
 		a, aErr := strconv.Atoi(targets[i].pid)
 		b, bErr := strconv.Atoi(targets[j].pid)
@@ -61,7 +98,6 @@ func findPortTargets(port int, portsByPID map[string][]int, entries []rawEntry) 
 		}
 		return a < b
 	})
-	return targets
 }
 
 func listensOn(ports []int, port int) bool {
@@ -74,7 +110,7 @@ func listensOn(ports []int, port int) bool {
 }
 
 type killModel struct {
-	port      int
+	label     string
 	targets   []killTarget
 	checked   []bool
 	cursor    int
@@ -84,13 +120,14 @@ type killModel struct {
 	done      bool
 }
 
-func newKillModel(port int, targets []killTarget) killModel {
+// label describes what was matched, e.g. "port 11434" or `matching "claude*"`.
+func newKillModel(label string, targets []killTarget) killModel {
 	checked := make([]bool, len(targets))
 	for i := range checked {
 		checked[i] = true
 	}
 	return killModel{
-		port:    port,
+		label:   label,
 		targets: targets,
 		checked: checked,
 		width:   80,
@@ -198,7 +235,7 @@ func (m killModel) View() string {
 
 	var sb strings.Builder
 
-	title := fmt.Sprintf("currentps kill   port %d   %s", m.port, warnStyle.Render(fmt.Sprintf("%d of %d will be killed", len(m.selectedTargets()), len(m.targets))))
+	title := fmt.Sprintf("currentps kill   %s   %s", m.label, warnStyle.Render(fmt.Sprintf("%d of %d will be killed", len(m.selectedTargets()), len(m.targets))))
 	sb.WriteString(headerStyle.Render(title))
 	sb.WriteString("\n")
 	sb.WriteString(dividerStyle.Render(strings.Repeat("─", 52)))
@@ -264,25 +301,66 @@ func parsePortArg(arg string) (int, error) {
 	return port, nil
 }
 
-// runKill drives `currentps kill <port>` and returns the process exit code.
+// isPortArg reports whether arg should be treated as a port rather than a
+// process-name glob: any all-digit argument is a port, valid or not.
+func isPortArg(arg string) bool {
+	if arg == "" {
+		return false
+	}
+	for _, r := range arg {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func parsePatternArg(arg string) (string, error) {
+	if _, err := path.Match(arg, ""); err != nil {
+		return "", fmt.Errorf("invalid pattern %q", arg)
+	}
+	return arg, nil
+}
+
+// runKill drives `currentps kill <port|pattern>` and returns the process exit code.
 func runKill(args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: currentps kill <port>")
+		fmt.Fprintln(os.Stderr, "usage: currentps kill <port|pattern>")
 		return 2
 	}
-	port, err := parsePortArg(args[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "currentps: %v\n", err)
-		return 2
+	arg := args[0]
+
+	var (
+		targets []killTarget
+		label   string
+	)
+	if isPortArg(arg) {
+		port, err := parsePortArg(arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "currentps: %v\n", err)
+			return 2
+		}
+		label = fmt.Sprintf("port %d", port)
+		targets = findPortTargets(port, fetchListeningPorts(), fetchProcesses().entries)
+		if len(targets) == 0 {
+			fmt.Printf("No processes listening on port %d\n", port)
+			return 0
+		}
+	} else {
+		pattern, err := parsePatternArg(arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "currentps: %v\n", err)
+			return 2
+		}
+		label = fmt.Sprintf("matching %q", pattern)
+		targets = findPatternTargets(pattern, fetchListeningPorts(), fetchProcesses().entries, strconv.Itoa(os.Getpid()))
+		if len(targets) == 0 {
+			fmt.Printf("No processes matching %q\n", pattern)
+			return 0
+		}
 	}
 
-	targets := findPortTargets(port, fetchListeningPorts(), fetchProcesses().entries)
-	if len(targets) == 0 {
-		fmt.Printf("No processes listening on port %d\n", port)
-		return 0
-	}
-
-	final, err := tea.NewProgram(newKillModel(port, targets)).Run()
+	final, err := tea.NewProgram(newKillModel(label, targets)).Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
