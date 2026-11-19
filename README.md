@@ -69,24 +69,22 @@ cancelled or a kill fails, `2` on a bad port or pattern.
 
 ## Keybindings
 
-There is no separate filter mode: printable keys always type into the filter
-query (name, PID or port). `/`, `j`, `k`, `q`, `a`, `n` and `x` are ordinary
-characters.
+Press `/` to filter by name, PID or port. While filtering, printable keys
+(space included) type into the query and `Esc` goes back to the list with the
+filter kept.
 
 | Key                 | Action                                        |
 |---------------------|-----------------------------------------------|
-| any printable key   | Type into the filter                          |
-| `↑` / `↓`           | Navigate list                                 |
-| `Enter`             | Toggle the process under the cursor           |
+| `/`                 | Start filtering                               |
+| `↑` / `↓`, `j` / `k` | Navigate list (`j` / `k` type while filtering) |
+| `Space`             | Toggle the process under the cursor           |
 | `Ctrl+A`            | Tick all visible (unfiltered) processes       |
 | `Ctrl+X`            | Untick all visible processes                  |
-| `Tab` / `Shift+Tab` | Move between the list and the action buttons  |
-| `Enter` (on button) | Run the focused button                        |
+| `Tab` / `Shift+Tab` | Highlight the next / previous action button   |
+| `Enter`             | Run the highlighted action button             |
 | `F1`                | Exclude ticked (persistent)                   |
 | `F2`                | Kill ticked processes (SIGKILL)               |
 | `F3`                | Copy command                                  |
-| `Esc`               | Clear the filter if set, else quit            |
+| `Esc`               | Leave the filter; on the list, clear the filter if set, else quit |
+| `q`                 | Quit (types `q` while filtering)              |
 | `Ctrl+C`            | Quit                                          |
-
-Focus starts on the list; `Space` types into the filter rather than ticking.
-Press `Tab` to reach the Exclude / Kill / Copy cmd / Quit buttons.
